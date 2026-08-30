@@ -1,0 +1,1 @@
+import React from 'react';import{createRoot}from'react-dom/client';import App from'./App';import'./styles/global.css';import'./styles/admin.css';import'./styles/login.css';import'./styles/athlete.css';import'./styles/animations.css';createRoot(document.getElementById('root')).render(<React.StrictMode><App/></React.StrictMode>);
