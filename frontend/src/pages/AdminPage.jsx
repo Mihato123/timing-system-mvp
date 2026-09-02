@@ -73,8 +73,14 @@ export default function AdminPage() {
 
   useEffect(() => {
     load();
-    const intervalID = setInterval(load, 15000);
-    return () => clearInterval(intervalID);
+
+    const intervalID = setInterval(() => {
+      load();
+    }, 5000);
+
+    return () => {
+      clearInterval(intervalID);
+    };
   }, []);
 
   function show(text, ok = true) {

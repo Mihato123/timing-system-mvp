@@ -1,18 +1,19 @@
-const express = require("express");
+﻿const express = require("express");
 const cors = require("cors");
-const { sql, poolPromise } = require("./database");
+
+const {
+  pool,
+  testDatabaseConnection
+} = require("./database");
 
 const app = express();
-const PORT = 3000;
+const PORT = Number(process.env.PORT || 3000);
 
 app.use(cors());
 app.use(express.json());
 
-// =====================================================
-// RESPONSE HELPERS
-// =====================================================
-function sendSuccess(res, data = {}, message = "OK") {
-  return res.json({
+function sendSuccess(res, data = {}, message = "OK", status = 200) {
+  return res.status(status).json({
     success: true,
     message,
     data
@@ -28,277 +29,68 @@ function sendError(res, status, message, code = undefined) {
 }
 
 function normalizeBib(value) {
-  return String(value || "").trim().toUpperCase();
+  return String(value || "")
+    .trim()
+    .toUpperCase();
 }
 
-// Keep old helper names so the existing route implementation remains clear
-// and compatible while the project is being refactored route-by-route.
-const ok = sendSuccess;
-const fail = sendError;
-const bib = normalizeBib;
-
-// =====================================================
-// AUDIT LOG
-// =====================================================
-async function audit(
-  pool,
-  action,
-  entityType,
-  entityId,
-  detail,
-  actor = "SYSTEM"
-) {
-  try {
-    await pool
-      .request()
-      .input("Action", sql.VarChar(50), action)
-      .input("EntityType", sql.VarChar(50), entityType)
-      .input("EntityID", sql.Int, entityId || null)
-      .input("Detail", sql.NVarChar(1000), detail || null)
-      .input("Actor", sql.NVarChar(100), actor)
-      .query(`
-        INSERT INTO AuditLogs
-        (
-          Action,
-          EntityType,
-          EntityID,
-          Detail,
-          Actor
-        )
-        VALUES
-        (
-          @Action,
-          @EntityType,
-          @EntityID,
-          @Detail,
-          @Actor
-        )
-      `);
-  } catch (error) {
-    // Audit logging must never interrupt the main race operation.
-    console.error("Audit log error:", error.message);
-  }
+function normalizeDistance(value) {
+  return String(value || "")
+    .trim()
+    .toUpperCase();
 }
 
-// =====================================================
-// LOCAL DEMO ADMIN ACCOUNTS
-// =====================================================
-async function ensureDemoAdminAccounts() {
-  const demoAccounts = [
-    {
-      username: "admin",
-      password: "admin123",
-      displayName: "Race Administrator",
-      role: "ADMIN"
-    },
-    {
-      username: "btc",
-      password: "btc123",
-      displayName: "Ban Tổ Chức",
-      role: "BTC"
-    },
-    {
-      username: "tnv",
-      password: "tnv123",
-      displayName: "Tình Nguyện Viên",
-      role: "TNV"
-    },
-    {
-      username: "medical",
-      password: "medical123",
-      displayName: "Medical Team",
-      role: "MEDICAL"
-    }
-  ];
+function normalizeText(value) {
+  const text = String(value ?? "").trim();
+  return text || null;
+}
 
+function toBoolean(value) {
+  return (
+    value === true ||
+    value === 1 ||
+    value === "1" ||
+    value === "true"
+  );
+}
+
+function isPositiveInteger(value) {
+  return Number.isInteger(value) && value > 0;
+}
+
+app.get("/api/health", async (req, res) => {
   try {
-    const pool = await poolPromise;
+    await pool.query("SELECT 1 AS ok");
 
-    for (const account of demoAccounts) {
-      await pool
-        .request()
-        .input("Username", sql.VarChar(50), account.username)
-        .input("Password", sql.NVarChar(255), account.password)
-        .input("DisplayName", sql.NVarChar(100), account.displayName)
-        .input("Role", sql.VarChar(20), account.role)
-        .query(`
-          IF EXISTS (
-            SELECT 1
-            FROM AdminUsers
-            WHERE Username = @Username
-          )
-          BEGIN
-            UPDATE AdminUsers
-            SET
-              PasswordHash = @Password,
-              DisplayName = @DisplayName,
-              Role = @Role,
-              IsActive = 1
-            WHERE Username = @Username;
-          END
-          ELSE
-          BEGIN
-            INSERT INTO AdminUsers
-            (
-              Username,
-              PasswordHash,
-              DisplayName,
-              Role,
-              IsActive
-            )
-            VALUES
-            (
-              @Username,
-              @Password,
-              @DisplayName,
-              @Role,
-              1
-            );
-          END
-        `);
-    }
-
-    console.log("✅ Demo admin accounts are ready");
+    return sendSuccess(
+      res,
+      {
+        server: "online",
+        database:
+          process.env.DB_NAME ||
+          "race_management",
+        databaseEngine: "MySQL"
+      },
+      "Race Timing Pro API online"
+    );
   } catch (error) {
     console.error(
-      "⚠️ Could not prepare demo admin accounts. Run database/upgrade.sql first:",
-      error.message
+      "Health check error:",
+      error
+    );
+
+    return sendError(
+      res,
+      503,
+      "API đang chạy nhưng chưa kết nối được MySQL.",
+      "DATABASE_UNAVAILABLE"
     );
   }
-}
-
-// =====================================================
-// DATABASE COMPATIBILITY / SAFE MIGRATIONS
-// =====================================================
-async function ensureDatabaseCompatibility() {
-  const pool = await poolPromise;
-
-  await pool.request().query(`
-    IF OBJECT_ID('dbo.ResultReviews', 'U') IS NOT NULL
-    BEGIN
-      IF COL_LENGTH('dbo.ResultReviews', 'ReviewSource') IS NULL
-        ALTER TABLE dbo.ResultReviews
-        ADD ReviewSource VARCHAR(20) NULL;
-
-      IF COL_LENGTH('dbo.ResultReviews', 'ReviewNotes') IS NULL
-        ALTER TABLE dbo.ResultReviews
-        ADD ReviewNotes NVARCHAR(1000) NULL;
-
-      IF COL_LENGTH('dbo.ResultReviews', 'Resolution') IS NULL
-        ALTER TABLE dbo.ResultReviews
-        ADD Resolution VARCHAR(30) NULL;
-
-      IF COL_LENGTH('dbo.ResultReviews', 'ResolutionNotes') IS NULL
-        ALTER TABLE dbo.ResultReviews
-        ADD ResolutionNotes NVARCHAR(1000) NULL;
-
-      UPDATE dbo.ResultReviews
-      SET ReviewSource = COALESCE(ReviewSource, 'BTC')
-      WHERE ReviewSource IS NULL;
-
-      IF COL_LENGTH('dbo.ResultReviews', 'ReviewNote') IS NOT NULL
-      BEGIN
-        EXEC(N'
-          UPDATE dbo.ResultReviews
-          SET ReviewNotes = COALESCE(ReviewNotes, ReviewNote)
-          WHERE ReviewNote IS NOT NULL;
-        ');
-      END;
-
-      IF COL_LENGTH(
-        'dbo.ResultReviews',
-        'ResolutionAction'
-      ) IS NOT NULL
-      BEGIN
-        EXEC(N'
-          UPDATE dbo.ResultReviews
-          SET Resolution =
-            COALESCE(Resolution, ResolutionAction)
-          WHERE ResolutionAction IS NOT NULL;
-        ');
-      END;
-    END;
-
-    IF OBJECT_ID('dbo.Complaints', 'U') IS NOT NULL
-    BEGIN
-      IF COL_LENGTH('dbo.Complaints', 'Resolution') IS NULL
-        ALTER TABLE dbo.Complaints
-        ADD Resolution VARCHAR(30) NULL;
-
-      IF COL_LENGTH(
-        'dbo.Complaints',
-        'ResolutionNote'
-      ) IS NULL
-        ALTER TABLE dbo.Complaints
-        ADD ResolutionNote NVARCHAR(1000) NULL;
-
-      IF COL_LENGTH('dbo.Complaints', 'ResolvedAt') IS NULL
-        ALTER TABLE dbo.Complaints
-        ADD ResolvedAt DATETIME2 NULL;
-    END;
-  `);
-
-  // =====================================================
-  // FIX LEGACY DEMO UNICODE DATA
-  // =====================================================
-  await pool.request().query(`
-    IF EXISTS (
-      SELECT 1
-      FROM dbo.Registrations
-      WHERE BibNumber = 'BIB004'
-    )
-    BEGIN
-      UPDATE dbo.Registrations
-      SET
-        MedicalCondition =
-          CASE
-            WHEN MedicalCondition LIKE '%?%'
-            THEN N'Hen suyễn'
-            ELSE MedicalCondition
-          END,
-
-        MedicalNotes =
-          CASE
-            WHEN MedicalNotes LIKE '%?%'
-            THEN N'Cần theo dõi khi vận động mạnh'
-            ELSE MedicalNotes
-          END
-      WHERE BibNumber = 'BIB004';
-
-      UPDATE u
-      SET FullName = N'Nguyễn Minh Test Updated'
-      FROM dbo.Users u
-      INNER JOIN dbo.Registrations r
-        ON r.UserID = u.UserID
-      WHERE r.BibNumber = 'BIB004'
-        AND u.FullName LIKE '%?%';
-    END;
-  `);
-
-  console.log(
-    "✅ Database compatibility checks completed"
-  );
-}
-
-// =====================================================
-// HEALTH CHECK
-// =====================================================
-app.get("/api/health", (req, res) => {
-  return sendSuccess(
-    res,
-    {
-      server: "online",
-      database: "RaceManagement"
-    },
-    "Race Timing Pro API online"
-  );
 });
 
-// =====================================================
-// AUTHENTICATION
-// =====================================================
-app.post("/api/auth/login", async (req, res) => {
-  try {
+app.post(
+  "/api/auth/login",
+  async (req, res) => {
     const username = String(
       req.body?.username || ""
     ).trim();
@@ -316,34 +108,30 @@ app.post("/api/auth/login", async (req, res) => {
       );
     }
 
-    const pool = await poolPromise;
+    const expectedUsername = String(
+      process.env.ADMIN_USERNAME || ""
+    ).trim();
 
-    const loginResult = await pool
-      .request()
-      .input(
-        "Username",
-        sql.VarChar(50),
-        username
-      )
-      .input(
-        "Password",
-        sql.NVarChar(255),
-        password
-      )
-      .query(`
-        SELECT TOP 1
-          AdminUserID,
-          Username,
-          DisplayName,
-          Role,
-          IsActive
-        FROM AdminUsers
-        WHERE Username = @Username
-          AND PasswordHash = @Password
-          AND IsActive = 1
-      `);
+    const expectedPassword = String(
+      process.env.ADMIN_PASSWORD || ""
+    );
 
-    if (loginResult.recordset.length === 0) {
+    if (
+      !expectedUsername ||
+      !expectedPassword
+    ) {
+      return sendError(
+        res,
+        503,
+        "Tài khoản quản trị local chưa được cấu hình trong .env.",
+        "ADMIN_LOGIN_NOT_CONFIGURED"
+      );
+    }
+
+    if (
+      username !== expectedUsername ||
+      password !== expectedPassword
+    ) {
       return sendError(
         res,
         401,
@@ -352,69 +140,58 @@ app.post("/api/auth/login", async (req, res) => {
       );
     }
 
-    const user = loginResult.recordset[0];
-
-    await audit(
-      pool,
-      "LOGIN",
-      "AdminUser",
-      user.AdminUserID,
-      "Đăng nhập hệ thống",
-      user.Username
-    );
-
     return sendSuccess(
       res,
       {
-        user,
-        token: `demo-${user.AdminUserID}-${Date.now()}`
+        user: {
+          Username: expectedUsername,
+          DisplayName: "Ban Tổ Chức",
+          Role: "BTC",
+          IsActive: 1
+        },
+        token: `local-${Date.now()}`
       },
       "Đăng nhập thành công"
     );
-  } catch (error) {
-    console.error(
-      "Login error:",
-      error
-    );
-
-    return sendError(
-      res,
-      500,
-      "Không thể đăng nhập vào hệ thống."
-    );
   }
-});
+);
 
-// =====================================================
-// ATHLETES
-// =====================================================
 app.get(
   "/api/athletes",
   async (req, res) => {
     try {
-      const pool = await poolPromise;
-
-      const result = await pool
-        .request()
-        .query(`
+      const [rows] =
+        await pool.query(`
           SELECT
-            u.*,
+            u.UserID,
+            u.FullName,
+            u.DateOfBirth,
+            u.Phone,
+            u.Email,
+            u.Gender,
+            u.CreatedAt AS UserCreatedAt,
+
             r.RegistrationID,
             r.BibNumber,
             r.Distance,
             r.HasMedicalCondition,
             r.MedicalCondition,
             r.MedicalNotes,
-            r.RegistrationStatus
+            r.RegistrationStatus,
+            r.CreatedAt AS RegistrationCreatedAt
+
           FROM Users u
+
           INNER JOIN Registrations r
-            ON u.UserID = r.UserID
-          ORDER BY r.RegistrationID DESC
+            ON r.UserID = u.UserID
+
+          ORDER BY
+            r.RegistrationID DESC
         `);
 
-      return ok(
+      return sendSuccess(
         res,
-        result.recordset
+        rows
       );
     } catch (error) {
       console.error(
@@ -422,7 +199,7 @@ app.get(
         error
       );
 
-      return fail(
+      return sendError(
         res,
         500,
         "Không thể lấy danh sách VĐV"
@@ -435,528 +212,14 @@ app.get(
   "/api/athletes/:bib",
   async (req, res) => {
     try {
-      const pool = await poolPromise;
-
-      const bibNumber = bib(
-        req.params.bib
-      );
-
-      const result = await pool
-        .request()
-        .input(
-          "Bib",
-          sql.VarChar(30),
-          bibNumber
-        )
-        .query(`
-          SELECT TOP 1
-            u.*,
-            r.RegistrationID,
-            r.BibNumber,
-            r.Distance,
-            r.HasMedicalCondition,
-            r.MedicalCondition,
-            r.MedicalNotes,
-            r.RegistrationStatus,
-            rr.RunID,
-            rr.StartTime,
-            rr.FinishTime,
-            rr.RunStatus
-          FROM Users u
-          INNER JOIN Registrations r
-            ON u.UserID = r.UserID
-          LEFT JOIN RaceRuns rr
-            ON r.RegistrationID =
-              rr.RegistrationID
-          WHERE r.BibNumber = @Bib
-        `);
-
-      if (
-        result.recordset.length === 0
-      ) {
-        return fail(
-          res,
-          404,
-          "Không tìm thấy BIB"
-        );
-      }
-
-      return ok(
-        res,
-        result.recordset[0]
-      );
-    } catch (error) {
-      console.error(
-        "Get athlete error:",
-        error
-      );
-
-      return fail(
-        res,
-        500,
-        "Có lỗi khi tìm VĐV"
-      );
-    }
-  }
-);
-
-// =====================================================
-// REGISTRATION
-// =====================================================
-app.post(
-  "/api/registrations",
-  async (req, res) => {
-    let transaction;
-
-    try {
-      const {
-        fullName,
-        dateOfBirth,
-        phone,
-        email,
-        gender,
-        distance,
-        hasMedicalCondition,
-        medicalCondition,
-        medicalNotes
-      } = req.body;
-
-      if (
-        !fullName ||
-        !phone ||
-        !distance
-      ) {
-        return fail(
-          res,
-          400,
-          "Họ tên, số điện thoại và cự ly là bắt buộc"
-        );
-      }
-
-      const allowedDistances = [
-        "5KM",
-        "10KM",
-        "21KM",
-        "42KM"
-      ];
-
-      if (
-        !allowedDistances.includes(
-          distance
-        )
-      ) {
-        return fail(
-          res,
-          400,
-          "Cự ly không hợp lệ"
-        );
-      }
-
-      if (
-        hasMedicalCondition &&
-        !String(
-          medicalCondition || ""
-        ).trim()
-      ) {
-        return fail(
-          res,
-          400,
-          "Vui lòng nhập tình trạng sức khỏe"
-        );
-      }
-
-      const pool = await poolPromise;
-
-      transaction =
-        new sql.Transaction(pool);
-
-      await transaction.begin();
-
-      // =================================================
-      // FIND USER BY PHONE
-      // =================================================
-      let request =
-        new sql.Request(
-          transaction
+      const bibNumber =
+        normalizeBib(
+          req.params.bib
         );
 
-      request.input(
-        "Phone",
-        sql.VarChar(30),
-        phone
-      );
-
-      const userResult =
-        await request.query(`
-          SELECT UserID
-          FROM Users
-          WHERE Phone = @Phone
-        `);
-
-      let userID;
-
-      if (
-        userResult.recordset.length >
-        0
-      ) {
-        userID =
-          userResult
-            .recordset[0]
-            .UserID;
-
-        request =
-          new sql.Request(
-            transaction
-          );
-
-        request
-          .input(
-            "UserID",
-            sql.Int,
-            userID
-          )
-          .input(
-            "FullName",
-            sql.NVarChar(150),
-            fullName
-          )
-          .input(
-            "DOB",
-            sql.Date,
-            dateOfBirth || null
-          )
-          .input(
-            "Email",
-            sql.VarChar(150),
-            email || null
-          )
-          .input(
-            "Gender",
-            sql.NVarChar(20),
-            gender || null
-          );
-
-        await request.query(`
-          UPDATE Users
-          SET
-            FullName = @FullName,
-            DateOfBirth = @DOB,
-            Email = @Email,
-            Gender = @Gender
-          WHERE UserID = @UserID
-        `);
-      } else {
-        request =
-          new sql.Request(
-            transaction
-          );
-
-        request
-          .input(
-            "FullName",
-            sql.NVarChar(150),
-            fullName
-          )
-          .input(
-            "DOB",
-            sql.Date,
-            dateOfBirth || null
-          )
-          .input(
-            "Phone",
-            sql.VarChar(30),
-            phone
-          )
-          .input(
-            "Email",
-            sql.VarChar(150),
-            email || null
-          )
-          .input(
-            "Gender",
-            sql.NVarChar(20),
-            gender || null
-          );
-
-        const insertedUser =
-          await request.query(`
-            INSERT INTO Users
-            (
-              FullName,
-              DateOfBirth,
-              Phone,
-              Email,
-              Gender
-            )
-            OUTPUT INSERTED.UserID
-            VALUES
-            (
-              @FullName,
-              @DOB,
-              @Phone,
-              @Email,
-              @Gender
-            )
-          `);
-
-        userID =
-          insertedUser
-            .recordset[0]
-            .UserID;
-      }
-
-      // =================================================
-      // FIND REGISTRATION
-      // =================================================
-      request =
-        new sql.Request(
-          transaction
-        );
-
-      request.input(
-        "UserID",
-        sql.Int,
-        userID
-      );
-
-      const existingRegistration =
-        await request.query(`
-          SELECT
-            RegistrationID,
-            BibNumber
-          FROM Registrations
-          WHERE UserID = @UserID
-        `);
-
-      let registrationID;
-      let bibNumber;
-
-      if (
-        existingRegistration
-          .recordset.length > 0
-      ) {
-        registrationID =
-          existingRegistration
-            .recordset[0]
-            .RegistrationID;
-
-        bibNumber =
-          existingRegistration
-            .recordset[0]
-            .BibNumber;
-
-        request =
-          new sql.Request(
-            transaction
-          );
-
-        request
-          .input(
-            "RegistrationID",
-            sql.Int,
-            registrationID
-          )
-          .input(
-            "Distance",
-            sql.VarChar(10),
-            distance
-          )
-          .input(
-            "HasMedicalCondition",
-            sql.Bit,
-            !!hasMedicalCondition
-          )
-          .input(
-            "MedicalCondition",
-            sql.NVarChar(300),
-            medicalCondition || null
-          )
-          .input(
-            "MedicalNotes",
-            sql.NVarChar(1000),
-            medicalNotes || null
-          );
-
-        await request.query(`
-          UPDATE Registrations
-          SET
-            Distance = @Distance,
-            HasMedicalCondition =
-              @HasMedicalCondition,
-            MedicalCondition =
-              @MedicalCondition,
-            MedicalNotes =
-              @MedicalNotes
-          WHERE RegistrationID =
-            @RegistrationID
-        `);
-      } else {
-        const nextBibRequest =
-          new sql.Request(
-            transaction
-          );
-
-        const nextBibResult =
-          await nextBibRequest.query(`
-            SELECT
-              ISNULL(
-                MAX(
-                  TRY_CONVERT(
-                    INT,
-                    SUBSTRING(
-                      BibNumber,
-                      4,
-                      20
-                    )
-                  )
-                ),
-                0
-              ) + 1 AS NextNumber
-            FROM Registrations
-            WHERE BibNumber LIKE 'BIB%'
-          `);
-
-        bibNumber =
-          "BIB" +
-          String(
-            nextBibResult
-              .recordset[0]
-              .NextNumber
-          ).padStart(
-            3,
-            "0"
-          );
-
-        request =
-          new sql.Request(
-            transaction
-          );
-
-        request
-          .input(
-            "UserID",
-            sql.Int,
-            userID
-          )
-          .input(
-            "Bib",
-            sql.VarChar(30),
-            bibNumber
-          )
-          .input(
-            "Distance",
-            sql.VarChar(10),
-            distance
-          )
-          .input(
-            "HasMedicalCondition",
-            sql.Bit,
-            !!hasMedicalCondition
-          )
-          .input(
-            "MedicalCondition",
-            sql.NVarChar(300),
-            medicalCondition || null
-          )
-          .input(
-            "MedicalNotes",
-            sql.NVarChar(1000),
-            medicalNotes || null
-          );
-
-        const insertedRegistration =
-          await request.query(`
-            INSERT INTO Registrations
-            (
-              UserID,
-              Distance,
-              BibNumber,
-              HasMedicalCondition,
-              MedicalCondition,
-              MedicalNotes,
-              RegistrationStatus
-            )
-            OUTPUT
-              INSERTED.RegistrationID
-            VALUES
-            (
-              @UserID,
-              @Distance,
-              @Bib,
-              @HasMedicalCondition,
-              @MedicalCondition,
-              @MedicalNotes,
-              'REGISTERED'
-            )
-          `);
-
-        registrationID =
-          insertedRegistration
-            .recordset[0]
-            .RegistrationID;
-      }
-
-      await transaction.commit();
-
-      await audit(
-        pool,
-        "REGISTER",
-        "Registration",
-        registrationID,
-        `BIB ${bibNumber}`,
-        "ATHLETE"
-      );
-
-      return ok(
-        res,
-        {
-          registrationID,
-          bibNumber,
-          status: "REGISTERED"
-        },
-        "Đăng ký thành công"
-      );
-    } catch (error) {
-      if (transaction) {
-        try {
-          await transaction.rollback();
-        } catch (
-          rollbackError
-        ) {
-          console.error(
-            "Registration rollback error:",
-            rollbackError
-          );
-        }
-      }
-
-      console.error(
-        "Registration error:",
-        error
-      );
-
-      return fail(
-        res,
-        500,
-        "Đăng ký thất bại"
-      );
-    }
-  }
-);
-
-// =====================================================
-// DASHBOARD
-// =====================================================
-app.get(
-  "/api/dashboard/athletes",
-  async (req, res) => {
-    try {
-      const pool = await poolPromise;
-
-      const result =
-        await pool
-          .request()
-          .query(`
+      const [rows] =
+        await pool.execute(
+          `
             SELECT
               u.UserID,
               u.FullName,
@@ -981,123 +244,191 @@ app.get(
               rs.ResultID,
               rs.TotalTimeSeconds,
               rs.ResultStatus,
-              rs.ApprovedAt,
-
-              (
-                SELECT TOP 1
-                  ScanTime
-                FROM Checkpoints c
-                WHERE c.RunID = rr.RunID
-                  AND c.CheckpointCode = 'CP01'
-                  AND c.ScanStatus = 'COMPLETED'
-                ORDER BY ScanTime DESC
-              ) AS CP01Time,
-
-              (
-                SELECT TOP 1
-                  ScanTime
-                FROM Checkpoints c
-                WHERE c.RunID = rr.RunID
-                  AND c.CheckpointCode = 'CP02'
-                  AND c.ScanStatus = 'COMPLETED'
-                ORDER BY ScanTime DESC
-              ) AS CP02Time,
-
-              (
-                SELECT TOP 1
-                  ScanTime
-                FROM Checkpoints c
-                WHERE c.RunID = rr.RunID
-                  AND c.CheckpointCode = 'CP03'
-                  AND c.ScanStatus = 'COMPLETED'
-                ORDER BY ScanTime DESC
-              ) AS CP03Time,
-
-              (
-                SELECT COUNT(*)
-                FROM MedicalAlerts ma
-                WHERE ma.RunID = rr.RunID
-                  AND ma.AlertStatus = 'PENDING'
-              ) AS PendingMedicalAlerts,
-
-              (
-                SELECT COUNT(*)
-                FROM RaceExceptions ex
-                WHERE ex.RunID = rr.RunID
-                  AND ex.ExceptionStatus = 'OPEN'
-              ) AS OpenExceptions
+              rs.ApprovedBy,
+              rs.ApprovedAt
 
             FROM Users u
 
             INNER JOIN Registrations r
-              ON u.UserID = r.UserID
+              ON r.UserID =
+                u.UserID
 
             LEFT JOIN RaceRuns rr
-              ON r.RegistrationID =
-                rr.RegistrationID
+              ON rr.RegistrationID =
+                r.RegistrationID
 
             LEFT JOIN Results rs
-              ON rr.RunID = rs.RunID
+              ON rs.RunID =
+                rr.RunID
 
-            ORDER BY
-              r.RegistrationID DESC
-          `);
+            WHERE r.BibNumber = ?
 
-      return ok(
+            LIMIT 1
+          `,
+          [bibNumber]
+        );
+
+      if (rows.length === 0) {
+        return sendError(
+          res,
+          404,
+          "Không tìm thấy BIB",
+          "BIB_NOT_FOUND"
+        );
+      }
+
+      return sendSuccess(
         res,
-        result.recordset
+        rows[0]
       );
     } catch (error) {
       console.error(
-        "Dashboard error:",
+        "Get athlete error:",
         error
       );
 
-      return fail(
+      return sendError(
         res,
         500,
-        "Không thể tải dashboard"
+        "Có lỗi khi tìm VĐV"
       );
     }
   }
 );
 
-// =====================================================
-// CHECK-IN ONE ATHLETE
-// =====================================================
-app.post(
-  "/api/check-in",
+app.put(
+  "/api/athletes/:bib",
   async (req, res) => {
+    const connection =
+      await pool.getConnection();
+
     try {
-      const bibNumber = bib(
-        req.body.bibNumber
-      );
+      const bibNumber =
+        normalizeBib(
+          req.params.bib
+        );
 
-      const pool = await poolPromise;
+      const fullName =
+        normalizeText(
+          req.body?.fullName
+        );
 
-      const athleteResult =
-        await pool
-          .request()
-          .input(
-            "Bib",
-            sql.VarChar(30),
-            bibNumber
-          )
-          .query(`
-            SELECT
-              r.*,
-              u.FullName
-            FROM Registrations r
-            INNER JOIN Users u
-              ON r.UserID = u.UserID
-            WHERE r.BibNumber = @Bib
-          `);
+      const dateOfBirth =
+        normalizeText(
+          req.body?.dateOfBirth
+        );
+
+      const email =
+        normalizeText(
+          req.body?.email
+        );
+
+      const gender =
+        normalizeText(
+          req.body?.gender
+        );
+
+      const phone =
+        normalizeText(
+          req.body?.phone
+        );
+
+      const distance =
+        req.body?.distance
+          ? normalizeDistance(
+              req.body.distance
+            )
+          : null;
+
+      const hasMedicalConditionProvided =
+        req.body?.hasMedicalCondition !==
+        undefined;
+
+      const hasMedicalCondition =
+        hasMedicalConditionProvided
+          ? toBoolean(
+              req.body.hasMedicalCondition
+            )
+          : null;
+
+      const medicalCondition =
+        normalizeText(
+          req.body?.medicalCondition
+        );
+
+      const medicalNotes =
+        normalizeText(
+          req.body?.medicalNotes
+        );
+
+      if (!bibNumber) {
+        return sendError(
+          res,
+          400,
+          "Vui lòng nhập BIB",
+          "BIB_REQUIRED"
+        );
+      }
+
+      const allowedDistances = [
+        "5KM",
+        "10KM",
+        "21KM",
+        "42KM"
+      ];
 
       if (
-        athleteResult
-          .recordset.length === 0
+        distance &&
+        !allowedDistances.includes(
+          distance
+        )
       ) {
-        return fail(
+        return sendError(
+          res,
+          400,
+          "Cự ly không hợp lệ",
+          "INVALID_DISTANCE"
+        );
+      }
+
+      await connection.beginTransaction();
+      const [rows] =
+        await connection.execute(
+          `
+            SELECT
+              u.UserID,
+              u.FullName,
+              u.DateOfBirth,
+              u.Phone,
+              u.Email,
+              u.Gender,
+
+              r.RegistrationID,
+              r.BibNumber,
+              r.Distance,
+              r.HasMedicalCondition,
+              r.MedicalCondition,
+              r.MedicalNotes,
+              r.RegistrationStatus
+
+            FROM Registrations r
+
+            INNER JOIN Users u
+              ON u.UserID =
+                r.UserID
+
+            WHERE r.BibNumber = ?
+
+            LIMIT 1
+            FOR UPDATE
+          `,
+          [bibNumber]
+        );
+
+      if (rows.length === 0) {
+        await connection.rollback();
+
+        return sendError(
           res,
           404,
           "Không tìm thấy BIB",
@@ -1106,147 +437,982 @@ app.post(
       }
 
       const athlete =
-        athleteResult.recordset[0];
+        rows[0];
+      const nextFullName =
+        req.body?.fullName !== undefined
+          ? fullName
+          : athlete.FullName;
+
+      const nextDateOfBirth =
+        req.body?.dateOfBirth !== undefined
+          ? dateOfBirth
+          : athlete.DateOfBirth;
+
+      const nextPhone =
+        req.body?.phone !== undefined
+          ? phone
+          : athlete.Phone;
+
+      const nextEmail =
+        req.body?.email !== undefined
+          ? email
+          : athlete.Email;
+
+      const nextGender =
+        req.body?.gender !== undefined
+          ? gender
+          : athlete.Gender;
 
       if (
-        athlete
-          .RegistrationStatus ===
-        "CHECKED_IN"
+        !nextFullName ||
+        !nextPhone
       ) {
-        return fail(
+        await connection.rollback();
+
+        return sendError(
+          res,
+          400,
+          "Họ tên và số điện thoại không được để trống",
+          "ATHLETE_REQUIRED"
+        );
+      }
+      const wantsToUpdateRegistration =
+        req.body?.distance !== undefined ||
+        req.body?.hasMedicalCondition !==
+          undefined ||
+        req.body?.medicalCondition !==
+          undefined ||
+        req.body?.medicalNotes !==
+          undefined;
+      if (
+        wantsToUpdateRegistration &&
+        athlete.RegistrationStatus !==
+          "REGISTERED"
+      ) {
+        await connection.rollback();
+
+        return sendError(
           res,
           409,
-          "VĐV đã check-in",
-          "ALREADY_CHECKED_IN"
+          "Cự ly và thông tin y tế đã được khóa sau khi check-in.",
+          "REGISTRATION_LOCKED"
+        );
+      }
+      await connection.execute(
+        `
+          UPDATE Users
+          SET
+            FullName = ?,
+            DateOfBirth = ?,
+            Phone = ?,
+            Email = ?,
+            Gender = ?
+          WHERE UserID = ?
+        `,
+        [
+          nextFullName,
+          nextDateOfBirth,
+          nextPhone,
+          nextEmail,
+          nextGender,
+          athlete.UserID
+        ]
+      );
+
+      if (wantsToUpdateRegistration) {
+        const nextDistance =
+          distance ??
+          athlete.Distance;
+
+        const nextHasMedicalCondition =
+          hasMedicalConditionProvided
+            ? hasMedicalCondition
+            : Boolean(
+                athlete.HasMedicalCondition
+              );
+
+        const nextMedicalCondition =
+          req.body?.medicalCondition !==
+          undefined
+            ? medicalCondition
+            : athlete.MedicalCondition;
+
+        const nextMedicalNotes =
+          req.body?.medicalNotes !==
+          undefined
+            ? medicalNotes
+            : athlete.MedicalNotes;
+
+        if (
+          nextHasMedicalCondition &&
+          !nextMedicalCondition
+        ) {
+          await connection.rollback();
+
+          return sendError(
+            res,
+            400,
+            "Vui lòng nhập tình trạng sức khỏe",
+            "MEDICAL_CONDITION_REQUIRED"
+          );
+        }
+
+        await connection.execute(
+          `
+            UPDATE Registrations
+            SET
+              Distance = ?,
+              HasMedicalCondition = ?,
+              MedicalCondition = ?,
+              MedicalNotes = ?
+            WHERE RegistrationID = ?
+          `,
+          [
+            nextDistance,
+
+            nextHasMedicalCondition
+              ? 1
+              : 0,
+
+            nextHasMedicalCondition
+              ? nextMedicalCondition
+              : null,
+
+            nextHasMedicalCondition
+              ? nextMedicalNotes
+              : null,
+
+            athlete.RegistrationID
+          ]
+        );
+      }
+      const [updatedRows] =
+        await connection.execute(
+          `
+            SELECT
+              u.UserID,
+              u.FullName,
+              u.DateOfBirth,
+              u.Phone,
+              u.Email,
+              u.Gender,
+
+              r.RegistrationID,
+              r.BibNumber,
+              r.Distance,
+              r.HasMedicalCondition,
+              r.MedicalCondition,
+              r.MedicalNotes,
+              r.RegistrationStatus
+
+            FROM Registrations r
+
+            INNER JOIN Users u
+              ON u.UserID =
+                r.UserID
+
+            WHERE r.BibNumber = ?
+
+            LIMIT 1
+          `,
+          [bibNumber]
+        );
+
+      await connection.commit();
+
+      return sendSuccess(
+        res,
+        updatedRows[0],
+        "Cập nhật thông tin VĐV thành công"
+      );
+    } catch (error) {
+      try {
+        await connection.rollback();
+      } catch (rollbackError) {
+        console.error(
+          "Update athlete rollback error:",
+          rollbackError
         );
       }
 
-      await pool
-        .request()
-        .input(
-          "RegistrationID",
-          sql.Int,
-          athlete.RegistrationID
-        )
-        .query(`
-          UPDATE Registrations
-          SET RegistrationStatus =
-            'CHECKED_IN'
-          WHERE RegistrationID =
-            @RegistrationID;
-
-          IF EXISTS (
-            SELECT 1
-            FROM RaceRuns
-            WHERE RegistrationID =
-              @RegistrationID
-          )
-          BEGIN
-            UPDATE RaceRuns
-            SET RunStatus =
-              CASE
-                WHEN StartTime IS NULL
-                THEN 'CHECKED_IN'
-                ELSE RunStatus
-              END
-            WHERE RegistrationID =
-              @RegistrationID;
-          END
-          ELSE
-          BEGIN
-            INSERT INTO RaceRuns
-            (
-              RegistrationID,
-              RunStatus
-            )
-            VALUES
-            (
-              @RegistrationID,
-              'CHECKED_IN'
-            );
-          END
-        `);
-
-      await audit(
-        pool,
-        "CHECK_IN",
-        "Registration",
-        athlete.RegistrationID,
-        bibNumber,
-        "BTC"
-      );
-
-      return ok(
-        res,
-        {
-          ...athlete,
-          registrationStatus:
-            "CHECKED_IN"
-        },
-        "Check-in thành công"
-      );
-    } catch (error) {
       console.error(
-        "Check-in error:",
+        "Update athlete error:",
         error
       );
 
-      return fail(
+      if (
+        error.code ===
+        "ER_DUP_ENTRY"
+      ) {
+        return sendError(
+          res,
+          409,
+          "Số điện thoại đã được sử dụng bởi VĐV khác.",
+          "DUPLICATE_PHONE"
+        );
+      }
+
+      return sendError(
         res,
         500,
-        "Có lỗi khi check-in"
+        "Không thể cập nhật thông tin VĐV",
+        "ATHLETE_UPDATE_FAILED"
+      );
+    } finally {
+      connection.release();
+    }
+  }
+);
+app.post(
+  "/api/registrations",
+  async (req, res) => {
+    const connection =
+      await pool.getConnection();
+
+    try {
+      const fullName = String(
+        req.body?.fullName || ""
+      ).trim();
+
+      const phone = String(
+        req.body?.phone || ""
+      ).trim();
+
+      const distance =
+        normalizeDistance(
+          req.body?.distance
+        );
+
+      const dateOfBirth =
+        normalizeText(
+          req.body?.dateOfBirth
+        );
+
+      const email =
+        normalizeText(
+          req.body?.email
+        );
+
+      const gender =
+        normalizeText(
+          req.body?.gender
+        );
+
+      const hasMedicalCondition =
+        toBoolean(
+          req.body?.hasMedicalCondition
+        );
+
+      const medicalCondition =
+        normalizeText(
+          req.body?.medicalCondition
+        );
+
+      const medicalNotes =
+        normalizeText(
+          req.body?.medicalNotes
+        );
+      if (
+        !fullName ||
+        !phone ||
+        !distance
+      ) {
+        return sendError(
+          res,
+          400,
+          "Họ tên, số điện thoại và cự ly là bắt buộc",
+          "REGISTRATION_REQUIRED"
+        );
+      }
+
+      const allowedDistances = [
+        "5KM",
+        "10KM",
+        "21KM",
+        "42KM"
+      ];
+
+      if (
+        !allowedDistances.includes(
+          distance
+        )
+      ) {
+        return sendError(
+          res,
+          400,
+          "Cự ly không hợp lệ",
+          "INVALID_DISTANCE"
+        );
+      }
+
+      if (
+        hasMedicalCondition &&
+        !medicalCondition
+      ) {
+        return sendError(
+          res,
+          400,
+          "Vui lòng nhập tình trạng sức khỏe",
+          "MEDICAL_CONDITION_REQUIRED"
+        );
+      }
+
+      await connection.beginTransaction();
+
+      const [existingUsers] =
+        await connection.execute(
+          `
+            SELECT
+              UserID
+            FROM Users
+            WHERE Phone = ?
+            LIMIT 1
+            FOR UPDATE
+          `,
+          [phone]
+        );
+
+      let userID;
+      
+      if (
+        existingUsers.length > 0
+      ) {
+        userID =
+          existingUsers[0].UserID;
+
+        await connection.execute(
+          `
+            UPDATE Users
+            SET
+              FullName = ?,
+              DateOfBirth = ?,
+              Email = ?,
+              Gender = ?
+            WHERE UserID = ?
+          `,
+          [
+            fullName,
+            dateOfBirth,
+            email,
+            gender,
+            userID
+          ]
+        );
+      } else {
+
+        const [insertedUser] =
+          await connection.execute(
+            `
+              INSERT INTO Users
+              (
+                FullName,
+                DateOfBirth,
+                Phone,
+                Email,
+                Gender
+              )
+              VALUES (?, ?, ?, ?, ?)
+            `,
+            [
+              fullName,
+              dateOfBirth,
+              phone,
+              email,
+              gender
+            ]
+          );
+
+        userID =
+          insertedUser.insertId;
+      }
+
+      const [existingRegistrations] =
+        await connection.execute(
+          `
+            SELECT
+              RegistrationID,
+              BibNumber,
+              RegistrationStatus
+            FROM Registrations
+            WHERE UserID = ?
+            LIMIT 1
+            FOR UPDATE
+          `,
+          [userID]
+        );
+
+      let registrationID;
+      let bibNumber;
+
+      if (
+        existingRegistrations.length > 0
+      ) {
+        const existing =
+          existingRegistrations[0];
+
+        if (
+          existing.RegistrationStatus !==
+          "REGISTERED"
+        ) {
+          await connection.rollback();
+
+          return sendError(
+            res,
+            409,
+            "Thông tin đăng ký đã được khóa sau khi check-in.",
+            "REGISTRATION_LOCKED"
+          );
+        }
+
+        registrationID =
+          existing.RegistrationID;
+
+        bibNumber =
+          existing.BibNumber;
+
+        await connection.execute(
+          `
+            UPDATE Registrations
+            SET
+              Distance = ?,
+              HasMedicalCondition = ?,
+              MedicalCondition = ?,
+              MedicalNotes = ?
+            WHERE RegistrationID = ?
+          `,
+          [
+            distance,
+            hasMedicalCondition
+              ? 1
+              : 0,
+            hasMedicalCondition
+              ? medicalCondition
+              : null,
+            hasMedicalCondition
+              ? medicalNotes
+              : null,
+            registrationID
+          ]
+        );
+      } else {
+  
+        const [latestBibRows] =
+          await connection.query(`
+            SELECT
+              BibNumber
+            FROM Registrations
+            WHERE BibNumber
+              REGEXP '^BIB[0-9]+$'
+            ORDER BY
+              RegistrationID DESC
+            LIMIT 1
+            FOR UPDATE
+          `);
+
+        let nextBibNumber = 1;
+
+        if (
+          latestBibRows.length > 0
+        ) {
+          const numericPart =
+            Number(
+              String(
+                latestBibRows[0]
+                  .BibNumber || ""
+              ).replace(
+                /^BIB/i,
+                ""
+              )
+            );
+
+          if (
+            Number.isFinite(
+              numericPart
+            )
+          ) {
+            nextBibNumber =
+              numericPart + 1;
+          }
+        }
+
+        bibNumber =
+          `BIB${String(
+            nextBibNumber
+          ).padStart(3, "0")}`;
+
+        const [insertedRegistration] =
+          await connection.execute(
+            `
+              INSERT INTO Registrations
+              (
+                UserID,
+                Distance,
+                BibNumber,
+                HasMedicalCondition,
+                MedicalCondition,
+                MedicalNotes,
+                RegistrationStatus
+              )
+              VALUES
+              (
+                ?,
+                ?,
+                ?,
+                ?,
+                ?,
+                ?,
+                'REGISTERED'
+              )
+            `,
+            [
+              userID,
+              distance,
+              bibNumber,
+              hasMedicalCondition
+                ? 1
+                : 0,
+              hasMedicalCondition
+                ? medicalCondition
+                : null,
+              hasMedicalCondition
+                ? medicalNotes
+                : null
+            ]
+          );
+
+        registrationID =
+          insertedRegistration.insertId;
+      }
+
+      await connection.commit();
+
+      return sendSuccess(
+        res,
+        {
+          registrationID,
+          bibNumber,
+          status: "REGISTERED"
+        },
+        existingRegistrations.length > 0
+          ? "Cập nhật đăng ký thành công"
+          : "Đăng ký thành công",
+        existingRegistrations.length > 0
+          ? 200
+          : 201
+      );
+    } catch (error) {
+      try {
+        await connection.rollback();
+      } catch (rollbackError) {
+        console.error(
+          "Registration rollback error:",
+          rollbackError
+        );
+      }
+
+      console.error(
+        "Registration error:",
+        error
+      );
+
+      if (
+        error.code ===
+        "ER_DUP_ENTRY"
+      ) {
+        return sendError(
+          res,
+          409,
+          "Dữ liệu đăng ký bị trùng. Vui lòng kiểm tra số điện thoại hoặc BIB.",
+          "DUPLICATE_REGISTRATION"
+        );
+      }
+
+      return sendError(
+        res,
+        500,
+        "Đăng ký thất bại",
+        "REGISTRATION_FAILED"
+      );
+    } finally {
+      connection.release();
+    }
+  }
+);
+
+app.get(
+  "/api/dashboard/athletes",
+  async (req, res) => {
+    try {
+      const [rows] =
+        await pool.query(`
+          SELECT
+            u.UserID,
+            u.FullName,
+            u.DateOfBirth,
+            u.Phone,
+            u.Email,
+            u.Gender,
+
+            r.RegistrationID,
+            r.BibNumber,
+            r.Distance,
+            r.HasMedicalCondition,
+            r.MedicalCondition,
+            r.MedicalNotes,
+            r.RegistrationStatus,
+
+            rr.RunID,
+            rr.StartTime,
+            rr.FinishTime,
+            rr.RunStatus,
+
+            rs.ResultID,
+            rs.TotalTimeSeconds,
+            rs.ResultStatus,
+            rs.ApprovedBy,
+            rs.ApprovedAt,
+
+            (
+              SELECT c.ScanTime
+              FROM Checkpoints c
+              WHERE c.RunID = rr.RunID
+                AND c.CheckpointCode = 'CP01'
+                AND c.ScanStatus = 'COMPLETED'
+              ORDER BY c.ScanTime DESC
+              LIMIT 1
+            ) AS CP01Time,
+
+            (
+              SELECT c.ScanTime
+              FROM Checkpoints c
+              WHERE c.RunID = rr.RunID
+                AND c.CheckpointCode = 'CP02'
+                AND c.ScanStatus = 'COMPLETED'
+              ORDER BY c.ScanTime DESC
+              LIMIT 1
+            ) AS CP02Time,
+
+            (
+              SELECT c.ScanTime
+              FROM Checkpoints c
+              WHERE c.RunID = rr.RunID
+                AND c.CheckpointCode = 'CP03'
+                AND c.ScanStatus = 'COMPLETED'
+              ORDER BY c.ScanTime DESC
+              LIMIT 1
+            ) AS CP03Time,
+
+            (
+              SELECT COUNT(*)
+              FROM MedicalAlerts ma
+              WHERE ma.RunID = rr.RunID
+                AND ma.AlertStatus = 'PENDING'
+            ) AS PendingMedicalAlerts
+
+          FROM Users u
+
+          INNER JOIN Registrations r
+            ON r.UserID = u.UserID
+
+          LEFT JOIN RaceRuns rr
+            ON rr.RegistrationID =
+              r.RegistrationID
+
+          LEFT JOIN Results rs
+            ON rs.RunID =
+              rr.RunID
+
+          ORDER BY
+            r.RegistrationID DESC
+        `);
+
+      return sendSuccess(
+        res,
+        rows
+      );
+    } catch (error) {
+      console.error(
+        "Dashboard error:",
+        error
+      );
+
+      return sendError(
+        res,
+        500,
+        "Không thể tải dashboard",
+        "DASHBOARD_FAILED"
       );
     }
   }
 );
 
-// =====================================================
-// CHECK-IN ALL REGISTERED ATHLETES
-// =====================================================
+app.post(
+  "/api/check-in",
+  async (req, res) => {
+    const connection =
+      await pool.getConnection();
+
+    try {
+      const bibNumber =
+        normalizeBib(
+          req.body?.bibNumber
+        );
+
+      if (!bibNumber) {
+        return sendError(
+          res,
+          400,
+          "Vui lòng nhập BIB",
+          "BIB_REQUIRED"
+        );
+      }
+
+      await connection.beginTransaction();
+
+      const [rows] =
+        await connection.execute(
+          `
+            SELECT
+              r.RegistrationID,
+              r.BibNumber,
+              r.Distance,
+              r.RegistrationStatus,
+
+              u.FullName
+
+            FROM Registrations r
+
+            INNER JOIN Users u
+              ON u.UserID =
+                r.UserID
+
+            WHERE r.BibNumber = ?
+
+            LIMIT 1
+            FOR UPDATE
+          `,
+          [bibNumber]
+        );
+
+      if (rows.length === 0) {
+        await connection.rollback();
+
+        return sendError(
+          res,
+          404,
+          "Không tìm thấy BIB",
+          "BIB_NOT_FOUND"
+        );
+      }
+
+      const athlete =
+        rows[0];
+
+
+      if (
+        athlete.RegistrationStatus ===
+        "CHECKED_IN"
+      ) {
+        const [runRows] =
+          await connection.execute(
+            `
+              SELECT
+                RunID,
+                RunStatus,
+                StartTime,
+                FinishTime
+              FROM RaceRuns
+              WHERE RegistrationID = ?
+              LIMIT 1
+            `,
+            [
+              athlete.RegistrationID
+            ]
+          );
+
+        await connection.commit();
+
+        return sendSuccess(
+          res,
+          {
+            ...athlete,
+
+            RunID:
+              runRows[0]?.RunID ||
+              null,
+
+            RunStatus:
+              runRows[0]?.RunStatus ||
+              "CHECKED_IN",
+
+            StartTime:
+              runRows[0]?.StartTime ||
+              null,
+
+            FinishTime:
+              runRows[0]?.FinishTime ||
+              null,
+
+            alreadyCheckedIn:
+              true
+          },
+          "VĐV đã check-in trước đó"
+        );
+      }
+
+      if (
+        athlete.RegistrationStatus !==
+        "REGISTERED"
+      ) {
+        await connection.rollback();
+
+        return sendError(
+          res,
+          409,
+          `Không thể check-in ở trạng thái ${athlete.RegistrationStatus}`,
+          "CHECK_IN_INVALID_STATUS"
+        );
+      }
+
+      await connection.execute(
+        `
+          UPDATE Registrations
+          SET
+            RegistrationStatus =
+              'CHECKED_IN'
+          WHERE RegistrationID = ?
+        `,
+        [
+          athlete.RegistrationID
+        ]
+      );
+
+
+      await connection.execute(
+        `
+          INSERT INTO RaceRuns
+          (
+            RegistrationID,
+            RunStatus
+          )
+          VALUES
+          (
+            ?,
+            'CHECKED_IN'
+          )
+
+          ON DUPLICATE KEY UPDATE
+            RunStatus =
+              CASE
+                WHEN StartTime IS NULL
+                  AND FinishTime IS NULL
+                THEN 'CHECKED_IN'
+                ELSE RunStatus
+              END
+        `,
+        [
+          athlete.RegistrationID
+        ]
+      );
+
+      const [runRows] =
+        await connection.execute(
+          `
+            SELECT
+              RunID,
+              RegistrationID,
+              StartTime,
+              FinishTime,
+              RunStatus
+            FROM RaceRuns
+            WHERE RegistrationID = ?
+            LIMIT 1
+          `,
+          [
+            athlete.RegistrationID
+          ]
+        );
+
+      await connection.commit();
+
+      return sendSuccess(
+        res,
+        {
+          ...athlete,
+
+          RegistrationStatus:
+            "CHECKED_IN",
+
+          RunID:
+            runRows[0]?.RunID ||
+            null,
+
+          RunStatus:
+            runRows[0]?.RunStatus ||
+            "CHECKED_IN",
+
+          StartTime:
+            runRows[0]?.StartTime ||
+            null,
+
+          FinishTime:
+            runRows[0]?.FinishTime ||
+            null
+        },
+        "Check-in thành công"
+      );
+    } catch (error) {
+      try {
+        await connection.rollback();
+      } catch (rollbackError) {
+        console.error(
+          "Check-in rollback error:",
+          rollbackError
+        );
+      }
+
+      console.error(
+        "Check-in error:",
+        error
+      );
+
+      return sendError(
+        res,
+        500,
+        "Có lỗi khi check-in",
+        "CHECK_IN_FAILED"
+      );
+    } finally {
+      connection.release();
+    }
+  }
+);
+
 app.post(
   "/api/check-in/all",
   async (req, res) => {
-    let transaction;
+    const connection =
+      await pool.getConnection();
 
     try {
-      const pool =
-        await poolPromise;
+      await connection.beginTransaction();
 
-      transaction =
-        new sql.Transaction(
-          pool
-        );
-
-      await transaction.begin();
-
-      const registeredRequest =
-        new sql.Request(
-          transaction
-        );
-
-      const registeredResult =
-        await registeredRequest.query(`
+      const [rows] =
+        await connection.query(`
           SELECT
             RegistrationID,
             BibNumber
           FROM Registrations
-            WITH (
-              UPDLOCK,
-              HOLDLOCK
-            )
           WHERE RegistrationStatus =
             'REGISTERED'
           ORDER BY RegistrationID
+          FOR UPDATE
         `);
 
-      const rows =
-        registeredResult.recordset ||
-        [];
-
       if (rows.length === 0) {
-        await transaction.commit();
+        await connection.commit();
 
-        return ok(
+        return sendSuccess(
           res,
           {
             checkedInCount: 0,
@@ -1256,73 +1422,58 @@ app.post(
         );
       }
 
-      await new sql.Request(
-        transaction
-      ).query(`
-        UPDATE Registrations
-        SET RegistrationStatus =
-          'CHECKED_IN'
-        WHERE RegistrationStatus =
-          'REGISTERED'
-      `);
+      const ids =
+        rows.map(
+          (row) =>
+            row.RegistrationID
+        );
 
-      await new sql.Request(
-        transaction
-      ).query(`
-        INSERT INTO RaceRuns
-        (
-          RegistrationID,
-          RunStatus
-        )
-        SELECT
-          r.RegistrationID,
-          'CHECKED_IN'
-        FROM Registrations r
-        WHERE r.RegistrationStatus =
-          'CHECKED_IN'
-          AND NOT EXISTS (
-            SELECT 1
-            FROM RaceRuns rr
-            WHERE rr.RegistrationID =
-              r.RegistrationID
-          )
-      `);
+      const placeholders =
+        ids
+          .map(() => "?")
+          .join(", ");
 
-      await new sql.Request(
-        transaction
-      ).query(`
-        UPDATE rr
-        SET rr.RunStatus =
-          'CHECKED_IN'
-        FROM RaceRuns rr
-        INNER JOIN Registrations r
-          ON r.RegistrationID =
-            rr.RegistrationID
-        WHERE r.RegistrationStatus =
-          'CHECKED_IN'
-          AND rr.StartTime IS NULL
-          AND rr.FinishTime IS NULL
-          AND ISNULL(
-            rr.RunStatus,
-            'CHECKED_IN'
-          ) NOT IN (
-            'STOPPED',
-            'FINISHED'
-          )
-      `);
-
-      await transaction.commit();
-
-      await audit(
-        pool,
-        "CHECK_IN_ALL",
-        "Registration",
-        null,
-        `Đã check-in hàng loạt ${rows.length} VĐV`,
-        "BTC"
+      await connection.execute(
+        `
+          UPDATE Registrations
+          SET
+            RegistrationStatus =
+              'CHECKED_IN'
+          WHERE RegistrationID
+            IN (${placeholders})
+        `,
+        ids
       );
 
-      return ok(
+      await connection.execute(
+        `
+          INSERT INTO RaceRuns
+          (
+            RegistrationID,
+            RunStatus
+          )
+          SELECT
+            RegistrationID,
+            'CHECKED_IN'
+          FROM Registrations
+          WHERE RegistrationID
+            IN (${placeholders})
+
+          ON DUPLICATE KEY UPDATE
+            RunStatus =
+              CASE
+                WHEN StartTime IS NULL
+                  AND FinishTime IS NULL
+                THEN 'CHECKED_IN'
+                ELSE RunStatus
+              END
+        `,
+        ids
+      );
+
+      await connection.commit();
+
+      return sendSuccess(
         res,
         {
           checkedInCount:
@@ -1337,17 +1488,13 @@ app.post(
         `Đã check-in ${rows.length} VĐV`
       );
     } catch (error) {
-      if (transaction) {
-        try {
-          await transaction.rollback();
-        } catch (
+      try {
+        await connection.rollback();
+      } catch (rollbackError) {
+        console.error(
+          "Check-in all rollback error:",
           rollbackError
-        ) {
-          console.error(
-            "Check-in all rollback error:",
-            rollbackError
-          );
-        }
+        );
       }
 
       console.error(
@@ -1355,86 +1502,124 @@ app.post(
         error
       );
 
-      return fail(
+      return sendError(
         res,
         500,
         "Không thể check-in tất cả VĐV",
         "CHECK_IN_ALL_FAILED"
       );
+    } finally {
+      connection.release();
     }
   }
 );
 
-// =====================================================
-// RACE HELPER
-// =====================================================
-async function raceRow(
-  pool,
-  bibNumber
+async function getRaceRow(
+  executor,
+  bibNumber,
+  lock = false
 ) {
-  const result =
-    await pool
-      .request()
-      .input(
-        "Bib",
-        sql.VarChar(30),
-        bibNumber
-      )
-      .query(`
+  const lockClause =
+    lock
+      ? "FOR UPDATE"
+      : "";
+
+  const [rows] =
+    await executor.execute(
+      `
         SELECT
+          u.UserID,
           u.FullName,
+          u.DateOfBirth,
+          u.Phone,
+          u.Email,
+          u.Gender,
+
           r.RegistrationID,
           r.BibNumber,
+          r.Distance,
+          r.HasMedicalCondition,
+          r.MedicalCondition,
+          r.MedicalNotes,
           r.RegistrationStatus,
+
           rr.RunID,
           rr.StartTime,
           rr.FinishTime,
           rr.RunStatus
-        FROM Registrations r
-        INNER JOIN Users u
-          ON r.UserID = u.UserID
-        LEFT JOIN RaceRuns rr
-          ON r.RegistrationID =
-            rr.RegistrationID
-        WHERE r.BibNumber = @Bib
-      `);
 
-  return result.recordset[0];
+        FROM Registrations r
+
+        INNER JOIN Users u
+          ON u.UserID =
+            r.UserID
+
+        LEFT JOIN RaceRuns rr
+          ON rr.RegistrationID =
+            r.RegistrationID
+
+        WHERE r.BibNumber = ?
+
+        LIMIT 1
+        ${lockClause}
+      `,
+      [bibNumber]
+    );
+
+  return (
+    rows[0] ||
+    null
+  );
 }
 
-// =====================================================
-// START RACE
-// =====================================================
 app.post(
   "/api/race/start",
   async (req, res) => {
-    try {
-      const bibNumber = bib(
-        req.body.bibNumber
-      );
+    const connection =
+      await pool.getConnection();
 
-      const pool = await poolPromise;
+    try {
+      const bibNumber =
+        normalizeBib(
+          req.body?.bibNumber
+        );
+
+      if (!bibNumber) {
+        return sendError(
+          res,
+          400,
+          "Vui lòng nhập BIB",
+          "BIB_REQUIRED"
+        );
+      }
+
+      await connection.beginTransaction();
 
       const athlete =
-        await raceRow(
-          pool,
-          bibNumber
+        await getRaceRow(
+          connection,
+          bibNumber,
+          true
         );
 
       if (!athlete) {
-        return fail(
+        await connection.rollback();
+
+        return sendError(
           res,
           404,
-          "Không tìm thấy BIB"
+          "Không tìm thấy BIB",
+          "BIB_NOT_FOUND"
         );
       }
 
       if (
-        athlete
-          .RegistrationStatus !==
+        athlete.RegistrationStatus !==
         "CHECKED_IN"
       ) {
-        return fail(
+        await connection.rollback();
+
+        return sendError(
           res,
           409,
           "VĐV chưa CHECK-IN",
@@ -1442,93 +1627,139 @@ app.post(
         );
       }
 
-      if (
-        athlete.RunStatus ===
-          "STOPPED" ||
-        athlete.RunStatus ===
-          "FINISHED"
-      ) {
-        return fail(
+      if (!athlete.RunID) {
+        await connection.rollback();
+
+        return sendError(
           res,
           409,
-          "Không thể START ở trạng thái hiện tại"
+          "Chưa có lượt chạy cho VĐV",
+          "RUN_NOT_CREATED"
         );
       }
 
-      if (athlete.StartTime) {
-        return ok(
+      if (
+        [
+          "STOPPED",
+          "FINISHED"
+        ].includes(
+          athlete.RunStatus
+        )
+      ) {
+        await connection.rollback();
+
+        return sendError(
+          res,
+          409,
+          "Không thể START ở trạng thái hiện tại",
+          "START_INVALID_STATUS"
+        );
+      }
+
+      if (
+        athlete.StartTime
+      ) {
+        await connection.commit();
+
+        return sendSuccess(
           res,
           {
-            ...athlete
+            ...athlete,
+            alreadyStarted: true
           },
           "VĐV đã START trước đó"
         );
       }
-
-      await pool
-        .request()
-        .input(
-          "RunID",
-          sql.Int,
-          athlete.RunID
-        )
-        .query(`
+      await connection.execute(
+        `
           UPDATE RaceRuns
           SET
-            StartTime = GETDATE(),
+            StartTime = NOW(3),
             RunStatus = 'RUNNING'
-          WHERE RunID = @RunID
-        `);
-
-      await audit(
-        pool,
-        "START",
-        "RaceRun",
-        athlete.RunID,
-        bibNumber,
-        "TNV"
+          WHERE RunID = ?
+        `,
+        [
+          athlete.RunID
+        ]
       );
 
-      return ok(
+      const [runRows] =
+        await connection.execute(
+          `
+            SELECT
+              RunID,
+              RegistrationID,
+              StartTime,
+              FinishTime,
+              RunStatus
+            FROM RaceRuns
+            WHERE RunID = ?
+            LIMIT 1
+          `,
+          [
+            athlete.RunID
+          ]
+        );
+
+      await connection.commit();
+
+      return sendSuccess(
         res,
         {
           bibNumber,
-          runStatus: "RUNNING"
+          FullName:
+            athlete.FullName,
+          Distance:
+            athlete.Distance,
+          ...runRows[0]
         },
         "START thành công"
       );
     } catch (error) {
+      try {
+        await connection.rollback();
+      } catch (rollbackError) {
+        console.error(
+          "Start rollback error:",
+          rollbackError
+        );
+      }
+
       console.error(
         "Start error:",
         error
       );
 
-      return fail(
+      return sendError(
         res,
         500,
-        "Không thể START"
+        "Không thể START",
+        "START_FAILED"
       );
+    } finally {
+      connection.release();
     }
   }
 );
 
-// =====================================================
-// CHECKPOINT
-// =====================================================
 app.post(
   "/api/race/checkpoint",
   async (req, res) => {
+    const connection =
+      await pool.getConnection();
+
     try {
-      const bibNumber = bib(
-        req.body.bibNumber
-      );
+      const bibNumber =
+        normalizeBib(
+          req.body?.bibNumber
+        );
 
       const checkpointCode =
         String(
-          req.body
-            .checkpointCode ||
-          ""
-        ).toUpperCase();
+          req.body?.checkpointCode || ""
+        )
+          .trim()
+          .toUpperCase();
 
       const allowedCheckpoints = [
         "CP01",
@@ -1536,31 +1767,59 @@ app.post(
         "CP03"
       ];
 
+      // ===============================================
+      // VALIDATE INPUT
+      // ===============================================
+      if (!bibNumber) {
+        return sendError(
+          res,
+          400,
+          "Vui lòng nhập BIB",
+          "BIB_REQUIRED"
+        );
+      }
+
       if (
         !allowedCheckpoints.includes(
           checkpointCode
         )
       ) {
-        return fail(
+        return sendError(
           res,
           400,
-          "Checkpoint không hợp lệ"
+          "Checkpoint không hợp lệ",
+          "INVALID_CHECKPOINT"
         );
       }
 
-      const pool = await poolPromise;
+      await connection.beginTransaction();
 
       const athlete =
-        await raceRow(
-          pool,
-          bibNumber
+        await getRaceRow(
+          connection,
+          bibNumber,
+          true
         );
 
       if (!athlete) {
-        return fail(
+        await connection.rollback();
+
+        return sendError(
           res,
           404,
-          "Không tìm thấy BIB"
+          "Không tìm thấy BIB",
+          "BIB_NOT_FOUND"
+        );
+      }
+
+      if (!athlete.RunID) {
+        await connection.rollback();
+
+        return sendError(
+          res,
+          409,
+          "Không tìm thấy lượt chạy",
+          "RUN_NOT_FOUND"
         );
       }
 
@@ -1568,128 +1827,130 @@ app.post(
         athlete.RunStatus !==
         "RUNNING"
       ) {
-        return fail(
+        await connection.rollback();
+
+        return sendError(
           res,
           409,
-          "VĐV không ở trạng thái RUNNING"
+          "VĐV không ở trạng thái RUNNING",
+          "RUN_NOT_RUNNING"
         );
       }
 
-      let previousCheckpoint =
-        null;
+      const [pendingMedicalRows] =
+        await connection.execute(
+          `
+            SELECT
+              AlertID,
+              AlertType,
+              AlertMessage,
+              AlertStatus,
+              CreatedAt
+            FROM MedicalAlerts
+            WHERE RunID = ?
+              AND AlertStatus = 'PENDING'
+            ORDER BY CreatedAt DESC
+            LIMIT 1
+          `,
+          [
+            athlete.RunID
+          ]
+        );
 
       if (
-        checkpointCode ===
-        "CP02"
+        pendingMedicalRows.length > 0
       ) {
-        previousCheckpoint =
-          "CP01";
+        await connection.rollback();
+
+        return sendError(
+          res,
+          409,
+          "VĐV đang có cảnh báo y tế PENDING. Cần Medical Team quyết định CONTINUE hoặc STOP trước khi tiếp tục.",
+          "MEDICAL_DECISION_REQUIRED"
+        );
       }
 
-      if (
-        checkpointCode ===
-        "CP03"
-      ) {
-        previousCheckpoint =
-          "CP02";
-      }
+      const previousCheckpointMap = {
+        CP01: null,
+        CP02: "CP01",
+        CP03: "CP02"
+      };
+
+      const previousCheckpoint =
+        previousCheckpointMap[
+          checkpointCode
+        ];
 
       if (previousCheckpoint) {
-        const previousResult =
-          await pool
-            .request()
-            .input(
-              "RunID",
-              sql.Int,
-              athlete.RunID
-            )
-            .input(
-              "Code",
-              sql.VarChar(10),
-              previousCheckpoint
-            )
-            .query(`
-              SELECT 1 AS IsCompleted
+        const [previousRows] =
+          await connection.execute(
+            `
+              SELECT
+                CheckpointID
               FROM Checkpoints
-              WHERE RunID = @RunID
-                AND CheckpointCode =
-                  @Code
-                AND ScanStatus =
-                  'COMPLETED'
-            `);
+              WHERE RunID = ?
+                AND CheckpointCode = ?
+                AND ScanStatus = 'COMPLETED'
+              LIMIT 1
+            `,
+            [
+              athlete.RunID,
+              previousCheckpoint
+            ]
+          );
 
         if (
-          previousResult
-            .recordset.length ===
-          0
+          previousRows.length === 0
         ) {
-          return fail(
+          await connection.rollback();
+
+          return sendError(
             res,
             409,
-            `Thiếu ${previousCheckpoint}. Hãy tạo Exception để BTC xác minh.`,
+            `Thiếu ${previousCheckpoint}. Cần BTC kiểm tra trước khi ghi ${checkpointCode}.`,
             "PREVIOUS_CP_MISSING"
           );
         }
       }
 
-      const existingCheckpoint =
-        await pool
-          .request()
-          .input(
-            "RunID",
-            sql.Int,
-            athlete.RunID
-          )
-          .input(
-            "Code",
-            sql.VarChar(10),
-            checkpointCode
-          )
-          .query(`
-            SELECT TOP 1
+      const [existingRows] =
+        await connection.execute(
+          `
+            SELECT
               CheckpointID,
-              ScanTime
+              RunID,
+              CheckpointCode,
+              ScanTime,
+              ScanStatus,
+              CreatedAt
             FROM Checkpoints
-            WHERE RunID = @RunID
-              AND CheckpointCode =
-                @Code
-              AND ScanStatus =
-                'COMPLETED'
-          `);
+            WHERE RunID = ?
+              AND CheckpointCode = ?
+            LIMIT 1
+          `,
+          [
+            athlete.RunID,
+            checkpointCode
+          ]
+        );
 
       if (
-        existingCheckpoint
-          .recordset.length > 0
+        existingRows.length > 0
       ) {
-        return ok(
+        await connection.commit();
+
+        return sendSuccess(
           res,
           {
-            checkpointCode,
-            scanTime:
-              existingCheckpoint
-                .recordset[0]
-                .ScanTime,
-            alreadyRecorded:
-              true
+            ...existingRows[0],
+            alreadyRecorded: true
           },
           `${checkpointCode} đã được ghi nhận`
         );
       }
-
-      const insertedCheckpoint =
-        await pool
-          .request()
-          .input(
-            "RunID",
-            sql.Int,
-            athlete.RunID
-          )
-          .input(
-            "Code",
-            sql.VarChar(10),
-            checkpointCode
-          )
-          .query(`
+      const [insertResult] =
+        await connection.execute(
+          `
             INSERT INTO Checkpoints
             (
               RunID,
@@ -1697,807 +1958,868 @@ app.post(
               ScanTime,
               ScanStatus
             )
-            OUTPUT INSERTED.*
             VALUES
             (
-              @RunID,
-              @Code,
-              GETDATE(),
+              ?,
+              ?,
+              NOW(3),
               'COMPLETED'
             )
-          `);
+          `,
+          [
+            athlete.RunID,
+            checkpointCode
+          ]
+        );
 
-      await audit(
-        pool,
-        "CHECKPOINT",
-        "RaceRun",
-        athlete.RunID,
-        `${bibNumber} ${checkpointCode}`,
-        "TNV"
-      );
+      const [checkpointRows] =
+        await connection.execute(
+          `
+            SELECT
+              CheckpointID,
+              RunID,
+              CheckpointCode,
+              ScanTime,
+              ScanStatus,
+              CreatedAt
+            FROM Checkpoints
+            WHERE CheckpointID = ?
+            LIMIT 1
+          `,
+          [
+            insertResult.insertId
+          ]
+        );
 
-      return ok(
+      await connection.commit();
+
+      return sendSuccess(
         res,
-        insertedCheckpoint
-          .recordset[0],
-        `${checkpointCode} thành công`
+        checkpointRows[0],
+        `${checkpointCode} thành công`,
+        201
       );
     } catch (error) {
+      try {
+        await connection.rollback();
+      } catch (rollbackError) {
+        console.error(
+          "Checkpoint rollback error:",
+          rollbackError
+        );
+      }
+
       console.error(
         "Checkpoint error:",
         error
       );
 
-      return fail(
-        res,
-        500,
-        "Không thể ghi checkpoint"
-      );
-    }
-  }
-);
-
-// =====================================================
-// CREATE RACE EXCEPTION
-// =====================================================
-app.post(
-  "/api/race/exception",
-  async (req, res) => {
-    try {
-      const bibNumber = bib(
-        req.body.bibNumber
-      );
-
-      const checkpointCode =
-        String(
-          req.body
-            .checkpointCode ||
-          ""
-        ).toUpperCase();
-
-      const reason =
-        String(
-          req.body.reason ||
-          "MISSING_SCAN"
-        );
-
-      const pool = await poolPromise;
-
-      const athlete =
-        await raceRow(
-          pool,
-          bibNumber
-        );
-
       if (
-        !athlete ||
-        !athlete.RunID
+        error.code ===
+        "ER_DUP_ENTRY"
       ) {
-        return fail(
+        return sendError(
           res,
-          404,
-          "Không tìm thấy lượt chạy"
+          409,
+          "Checkpoint đã được ghi nhận trước đó.",
+          "CHECKPOINT_ALREADY_RECORDED"
         );
       }
 
-      const insertedException =
-        await pool
-          .request()
-          .input(
-            "RunID",
-            sql.Int,
+      return sendError(
+        res,
+        500,
+        "Không thể ghi checkpoint",
+        "CHECKPOINT_FAILED"
+      );
+    } finally {
+      connection.release();
+    }
+  }
+);
+
+app.get(
+  "/api/medical/monitor",
+  async (req, res) => {
+    try {
+      const [rows] =
+        await pool.query(`
+          SELECT
+            u.FullName,
+
+            r.RegistrationID,
+            r.BibNumber,
+            r.Distance,
+            r.HasMedicalCondition,
+            r.MedicalCondition,
+            r.MedicalNotes,
+            r.RegistrationStatus,
+
+            rr.RunID,
+            rr.StartTime,
+            rr.FinishTime,
+            rr.RunStatus,
+
+            (
+              SELECT c.CheckpointCode
+              FROM Checkpoints c
+              WHERE c.RunID = rr.RunID
+                AND c.ScanStatus = 'COMPLETED'
+              ORDER BY c.ScanTime DESC
+              LIMIT 1
+            ) AS LatestCheckpoint,
+
+            (
+              SELECT c.ScanTime
+              FROM Checkpoints c
+              WHERE c.RunID = rr.RunID
+                AND c.ScanStatus = 'COMPLETED'
+              ORDER BY c.ScanTime DESC
+              LIMIT 1
+            ) AS LatestCheckpointTime,
+
+            (
+              SELECT ma.AlertID
+              FROM MedicalAlerts ma
+              WHERE ma.RunID = rr.RunID
+              ORDER BY ma.CreatedAt DESC
+              LIMIT 1
+            ) AS LatestAlertID,
+
+            (
+              SELECT ma.AlertType
+              FROM MedicalAlerts ma
+              WHERE ma.RunID = rr.RunID
+              ORDER BY ma.CreatedAt DESC
+              LIMIT 1
+            ) AS LatestAlertType,
+
+            (
+              SELECT ma.AlertMessage
+              FROM MedicalAlerts ma
+              WHERE ma.RunID = rr.RunID
+              ORDER BY ma.CreatedAt DESC
+              LIMIT 1
+            ) AS LatestAlertMessage,
+
+            (
+              SELECT ma.AlertStatus
+              FROM MedicalAlerts ma
+              WHERE ma.RunID = rr.RunID
+              ORDER BY ma.CreatedAt DESC
+              LIMIT 1
+            ) AS LatestAlertStatus,
+
+            (
+              SELECT ma.MedicalDecision
+              FROM MedicalAlerts ma
+              WHERE ma.RunID = rr.RunID
+              ORDER BY ma.CreatedAt DESC
+              LIMIT 1
+            ) AS LatestMedicalDecision,
+
+            (
+              SELECT ma.CreatedAt
+              FROM MedicalAlerts ma
+              WHERE ma.RunID = rr.RunID
+              ORDER BY ma.CreatedAt DESC
+              LIMIT 1
+            ) AS LatestAlertCreatedAt,
+
+            (
+              SELECT COUNT(*)
+              FROM MedicalAlerts ma
+              WHERE ma.RunID = rr.RunID
+                AND ma.AlertStatus = 'PENDING'
+            ) AS PendingMedicalAlerts
+
+          FROM Registrations r
+
+          INNER JOIN Users u
+            ON u.UserID =
+              r.UserID
+
+          LEFT JOIN RaceRuns rr
+            ON rr.RegistrationID =
+              r.RegistrationID
+
+          WHERE
+            rr.RunID IS NOT NULL
+
+          ORDER BY
+            CASE rr.RunStatus
+              WHEN 'RUNNING' THEN 1
+              WHEN 'STOPPED' THEN 2
+              WHEN 'FINISHED' THEN 3
+              WHEN 'CHECKED_IN' THEN 4
+              ELSE 5
+            END,
+            r.BibNumber
+        `);
+
+      return sendSuccess(
+        res,
+        rows
+      );
+    } catch (error) {
+      console.error(
+        "Medical monitor error:",
+        error
+      );
+
+      return sendError(
+        res,
+        500,
+        "Không thể tải dữ liệu theo dõi y tế",
+        "MEDICAL_MONITOR_FAILED"
+      );
+    }
+  }
+);
+
+app.post(
+  "/api/medical/alert",
+  async (req, res) => {
+    const connection =
+      await pool.getConnection();
+
+    try {
+      const bibNumber =
+        normalizeBib(
+          req.body?.bibNumber
+        );
+
+      const alertType =
+        normalizeText(
+          req.body?.alertType
+        );
+
+      const alertMessage =
+        normalizeText(
+          req.body?.alertMessage
+        );
+
+      if (!bibNumber) {
+        return sendError(
+          res,
+          400,
+          "Vui lòng nhập BIB",
+          "BIB_REQUIRED"
+        );
+      }
+
+      if (!alertType) {
+        return sendError(
+          res,
+          400,
+          "Vui lòng nhập loại cảnh báo y tế",
+          "ALERT_TYPE_REQUIRED"
+        );
+      }
+
+      if (!alertMessage) {
+        return sendError(
+          res,
+          400,
+          "Vui lòng nhập nội dung cảnh báo y tế",
+          "ALERT_MESSAGE_REQUIRED"
+        );
+      }
+
+      await connection.beginTransaction();
+
+      const athlete =
+        await getRaceRow(
+          connection,
+          bibNumber,
+          true
+        );
+
+      if (!athlete) {
+        await connection.rollback();
+
+        return sendError(
+          res,
+          404,
+          "Không tìm thấy BIB",
+          "BIB_NOT_FOUND"
+        );
+      }
+
+      if (!athlete.RunID) {
+        await connection.rollback();
+
+        return sendError(
+          res,
+          409,
+          "VĐV chưa có lượt chạy",
+          "RUN_NOT_FOUND"
+        );
+      }
+
+      if (
+        athlete.RunStatus !==
+        "RUNNING"
+      ) {
+        await connection.rollback();
+
+        return sendError(
+          res,
+          409,
+          "Chỉ có thể tạo cảnh báo y tế khi VĐV đang RUNNING.",
+          "MEDICAL_ALERT_INVALID_RUN_STATUS"
+        );
+      }
+
+      const [pendingRows] =
+        await connection.execute(
+          `
+            SELECT
+              AlertID,
+              AlertType,
+              AlertMessage,
+              AlertStatus,
+              CreatedAt
+            FROM MedicalAlerts
+            WHERE RunID = ?
+              AND AlertStatus = 'PENDING'
+            ORDER BY CreatedAt DESC
+            LIMIT 1
+            FOR UPDATE
+          `,
+          [
             athlete.RunID
-          )
-          .input(
-            "Code",
-            sql.VarChar(10),
-            checkpointCode
-          )
-          .input(
-            "Reason",
-            sql.VarChar(50),
-            reason
-          )
-          .input(
-            "Note",
-            sql.NVarChar(1000),
-            req.body.note ||
-              null
-          )
-          .query(`
-            INSERT INTO RaceExceptions
+          ]
+        );
+
+      if (
+        pendingRows.length > 0
+      ) {
+        await connection.commit();
+
+        return sendSuccess(
+          res,
+          {
+            ...pendingRows[0],
+            alreadyPending: true
+          },
+          "VĐV đang có một cảnh báo y tế PENDING"
+        );
+      }
+
+      const [insertResult] =
+        await connection.execute(
+          `
+            INSERT INTO MedicalAlerts
             (
               RunID,
-              CheckpointCode,
-              ExceptionType,
-              ExceptionNote,
-              ExceptionStatus
+              AlertType,
+              AlertMessage,
+              AlertStatus,
+              MedicalDecision,
+              CreatedAt,
+              ResolvedAt
             )
-            OUTPUT INSERTED.*
             VALUES
             (
-              @RunID,
-              @Code,
-              @Reason,
-              @Note,
-              'OPEN'
+              ?,
+              ?,
+              ?,
+              'PENDING',
+              NULL,
+              NOW(3),
+              NULL
             )
-          `);
+          `,
+          [
+            athlete.RunID,
+            alertType,
+            alertMessage
+          ]
+        );
 
-      await audit(
-        pool,
-        "CREATE_EXCEPTION",
-        "RaceRun",
-        athlete.RunID,
-        `${bibNumber} ${checkpointCode} ${reason}`,
-        "TNV"
-      );
-
-      return res
-        .status(201)
-        .json({
-          success: true,
-          message:
-            "Đã tạo Exception",
-          data:
-            insertedException
-              .recordset[0]
-        });
-    } catch (error) {
-      console.error(
-        "Create Exception error:",
-        error
-      );
-
-      return fail(
-        res,
-        500,
-        "Không thể tạo Exception"
-      );
-    }
-  }
-);
-
-// =====================================================
-// GET EXCEPTIONS
-// =====================================================
-app.get(
-  "/api/race/exceptions",
-  async (req, res) => {
-    try {
-      const pool = await poolPromise;
-
-      const result =
-        await pool
-          .request()
-          .query(`
+      const [alertRows] =
+        await connection.execute(
+          `
             SELECT
-              ex.*,
-              r.BibNumber,
-              r.Distance,
-              u.FullName
-            FROM RaceExceptions ex
-            INNER JOIN RaceRuns rr
-              ON ex.RunID = rr.RunID
-            INNER JOIN Registrations r
-              ON rr.RegistrationID =
-                r.RegistrationID
-            INNER JOIN Users u
-              ON r.UserID = u.UserID
-            ORDER BY
-              CASE
-                WHEN ex.ExceptionStatus =
-                  'OPEN'
-                THEN 0
-                ELSE 1
-              END,
-              ex.CreatedAt DESC
-          `);
+              AlertID,
+              RunID,
+              AlertType,
+              AlertMessage,
+              AlertStatus,
+              MedicalDecision,
+              CreatedAt,
+              ResolvedAt
+            FROM MedicalAlerts
+            WHERE AlertID = ?
+            LIMIT 1
+          `,
+          [
+            insertResult.insertId
+          ]
+        );
 
-      return ok(
+      await connection.commit();
+
+      return sendSuccess(
         res,
-        result.recordset
+        alertRows[0],
+        "Đã tạo cảnh báo y tế",
+        201
       );
     } catch (error) {
+      try {
+        await connection.rollback();
+      } catch (rollbackError) {
+        console.error(
+          "Medical alert rollback error:",
+          rollbackError
+        );
+      }
+
       console.error(
-        "Load exceptions error:",
+        "Medical alert error:",
         error
       );
 
-      return fail(
+      return sendError(
         res,
         500,
-        "Không thể tải Exception"
+        "Không thể tạo cảnh báo y tế",
+        "MEDICAL_ALERT_FAILED"
+      );
+    } finally {
+      connection.release();
+    }
+  }
+);
+app.get(
+  "/api/medical/alerts",
+  async (req, res) => {
+    try {
+      const status =
+        String(
+          req.query?.status || ""
+        )
+          .trim()
+          .toUpperCase();
+
+      let sqlText = `
+        SELECT
+          ma.AlertID,
+          ma.RunID,
+          ma.AlertType,
+          ma.AlertMessage,
+          ma.AlertStatus,
+          ma.MedicalDecision,
+          ma.CreatedAt,
+          ma.ResolvedAt,
+
+          r.BibNumber,
+          r.Distance,
+          r.HasMedicalCondition,
+          r.MedicalCondition,
+          r.MedicalNotes,
+
+          rr.RunStatus,
+
+          u.FullName
+
+        FROM MedicalAlerts ma
+
+        INNER JOIN RaceRuns rr
+          ON rr.RunID =
+            ma.RunID
+
+        INNER JOIN Registrations r
+          ON r.RegistrationID =
+            rr.RegistrationID
+
+        INNER JOIN Users u
+          ON u.UserID =
+            r.UserID
+      `;
+
+      const params = [];
+
+      if (status) {
+        sqlText += `
+          WHERE ma.AlertStatus = ?
+        `;
+
+        params.push(status);
+      }
+
+      sqlText += `
+        ORDER BY
+          CASE ma.AlertStatus
+            WHEN 'PENDING' THEN 1
+            WHEN 'RESOLVED' THEN 2
+            ELSE 3
+          END,
+          ma.CreatedAt DESC
+      `;
+
+      const [rows] =
+        await pool.execute(
+          sqlText,
+          params
+        );
+
+      return sendSuccess(
+        res,
+        rows
+      );
+    } catch (error) {
+      console.error(
+        "Get medical alerts error:",
+        error
+      );
+
+      return sendError(
+        res,
+        500,
+        "Không thể tải cảnh báo y tế",
+        "MEDICAL_ALERTS_FAILED"
       );
     }
   }
 );
 
-// =====================================================
-// RESOLVE EXCEPTION
-// =====================================================
 app.post(
-  "/api/race/exception/resolve",
+  "/api/medical/decision",
   async (req, res) => {
-    let transaction;
+    const connection =
+      await pool.getConnection();
 
     try {
-      const {
-        exceptionID,
-        decision,
-        note
-      } = req.body;
+      const alertID =
+        Number(
+          req.body?.alertID
+        );
+
+      const decision =
+        String(
+          req.body?.decision || ""
+        )
+          .trim()
+          .toUpperCase();
 
       const allowedDecisions = [
-        "CONFIRM_PASS",
-        "DNF"
+        "CONTINUE",
+        "STOP"
       ];
+
+      if (
+        !isPositiveInteger(
+          alertID
+        )
+      ) {
+        return sendError(
+          res,
+          400,
+          "AlertID không hợp lệ",
+          "INVALID_ALERT_ID"
+        );
+      }
 
       if (
         !allowedDecisions.includes(
           decision
         )
       ) {
-        return fail(
+        return sendError(
           res,
           400,
-          "Quyết định không hợp lệ"
+          "MedicalDecision chỉ được là CONTINUE hoặc STOP",
+          "INVALID_MEDICAL_DECISION"
         );
       }
 
-      const pool = await poolPromise;
+      await connection.beginTransaction();
 
-      transaction =
-        new sql.Transaction(
-          pool
-        );
 
-      await transaction.begin();
-
-      const exceptionRequest =
-        new sql.Request(
-          transaction
-        );
-
-      exceptionRequest.input(
-        "ExceptionID",
-        sql.Int,
-        exceptionID
-      );
-
-      const exceptionResult =
-        await exceptionRequest.query(`
-          SELECT *
-          FROM RaceExceptions
-          WHERE ExceptionID =
-            @ExceptionID
-        `);
-
-      if (
-        exceptionResult
-          .recordset.length === 0
-      ) {
-        await transaction.rollback();
-
-        return fail(
-          res,
-          404,
-          "Không tìm thấy Exception"
-        );
-      }
-
-      const exception =
-        exceptionResult
-          .recordset[0];
-
-      if (
-        decision ===
-        "CONFIRM_PASS"
-      ) {
-        const checkpointRequest =
-          new sql.Request(
-            transaction
-          );
-
-        checkpointRequest
-          .input(
-            "RunID",
-            sql.Int,
-            exception.RunID
-          )
-          .input(
-            "Code",
-            sql.VarChar(10),
-            exception.CheckpointCode
-          );
-
-        await checkpointRequest.query(`
-          IF NOT EXISTS (
-            SELECT 1
-            FROM Checkpoints
-            WHERE RunID = @RunID
-              AND CheckpointCode =
-                @Code
-              AND ScanStatus =
-                'COMPLETED'
-          )
-          BEGIN
-            INSERT INTO Checkpoints
-            (
-              RunID,
-              CheckpointCode,
-              ScanTime,
-              ScanStatus
-            )
-            VALUES
-            (
-              @RunID,
-              @Code,
-              GETDATE(),
-              'COMPLETED'
-            );
-          END
-        `);
-      } else {
-        await new sql.Request(
-          transaction
-        )
-          .input(
-            "RunID",
-            sql.Int,
-            exception.RunID
-          )
-          .query(`
-            UPDATE RaceRuns
-            SET RunStatus =
-              'STOPPED'
-            WHERE RunID = @RunID
-              AND FinishTime IS NULL
-          `);
-      }
-
-      const updateException =
-        new sql.Request(
-          transaction
-        );
-
-      updateException
-        .input(
-          "ExceptionID",
-          sql.Int,
-          exceptionID
-        )
-        .input(
-          "Decision",
-          sql.VarChar(30),
-          decision
-        )
-        .input(
-          "Note",
-          sql.NVarChar(1000),
-          note || null
-        );
-
-      await updateException.query(`
-        UPDATE RaceExceptions
-        SET
-          ExceptionStatus =
-            'RESOLVED',
-          Resolution =
-            @Decision,
-          ResolutionNote =
-            @Note,
-          ResolvedAt =
-            GETDATE()
-        WHERE ExceptionID =
-          @ExceptionID
-      `);
-
-      await transaction.commit();
-
-      return ok(
-        res,
-        {
-          decision
-        },
-        "Đã xử lý Exception"
-      );
-    } catch (error) {
-      if (transaction) {
-        try {
-          await transaction.rollback();
-        } catch (
-          rollbackError
-        ) {
-          console.error(
-            "Exception rollback error:",
-            rollbackError
-          );
-        }
-      }
-
-      console.error(
-        "Resolve exception error:",
-        error
-      );
-
-      return fail(
-        res,
-        500,
-        "Không thể xử lý Exception"
-      );
-    }
-  }
-);
-
-// =====================================================
-// CREATE MEDICAL ALERT
-// =====================================================
-app.post(
-  "/api/medical/alert",
-  async (req, res) => {
-    try {
-      const bibNumber = bib(
-        req.body.bibNumber
-      );
-
-      const pool = await poolPromise;
-
-      const athlete =
-        await raceRow(
-          pool,
-          bibNumber
-        );
-
-      if (
-        !athlete ||
-        !athlete.RunID
-      ) {
-        return fail(
-          res,
-          404,
-          "Không tìm thấy lượt chạy"
-        );
-      }
-
-      if (
-        athlete.RunStatus !==
-        "RUNNING"
-      ) {
-        return fail(
-          res,
-          409,
-          "Chỉ tạo cảnh báo khi VĐV đang RUNNING"
-        );
-      }
-
-      const alertType =
-        String(
-          req.body.alertType ||
-          "OTHER"
-        ).toUpperCase();
-
-      const alertResult =
-        await pool
-          .request()
-          .input(
-            "RunID",
-            sql.Int,
-            athlete.RunID
-          )
-          .input(
-            "Type",
-            sql.VarChar(50),
-            alertType
-          )
-          .input(
-            "Message",
-            sql.NVarChar(1000),
-            req.body
-              .alertMessage ||
-              null
-          )
-          .query(`
-            INSERT INTO MedicalAlerts
-            (
-              RunID,
-              AlertType,
-              AlertMessage,
-              AlertStatus
-            )
-            OUTPUT INSERTED.*
-            VALUES
-            (
-              @RunID,
-              @Type,
-              @Message,
-              'PENDING'
-            )
-          `);
-
-      await audit(
-        pool,
-        "MEDICAL_ALERT",
-        "RaceRun",
-        athlete.RunID,
-        bibNumber,
-        "TNV"
-      );
-
-      return res
-        .status(201)
-        .json({
-          success: true,
-          message:
-            "Đã gửi cảnh báo y tế",
-          data:
-            alertResult
-              .recordset[0]
-        });
-    } catch (error) {
-      console.error(
-        "Medical alert error:",
-        error
-      );
-
-      return fail(
-        res,
-        500,
-        "Không thể tạo cảnh báo y tế"
-      );
-    }
-  }
-);
-
-// =====================================================
-// GET MEDICAL ALERTS
-// =====================================================
-app.get(
-  "/api/medical/alerts",
-  async (req, res) => {
-    try {
-      const pool = await poolPromise;
-
-      const result =
-        await pool
-          .request()
-          .query(`
+      const [alertRows] =
+        await connection.execute(
+          `
             SELECT
-              ma.*,
-              r.BibNumber,
-              r.Distance,
-              r.HasMedicalCondition,
-              r.MedicalCondition,
-              r.MedicalNotes,
-              u.FullName,
+              ma.AlertID,
+              ma.RunID,
+              ma.AlertType,
+              ma.AlertMessage,
+              ma.AlertStatus,
+              ma.MedicalDecision,
+              ma.CreatedAt,
+              ma.ResolvedAt,
+
               rr.RunStatus
+
             FROM MedicalAlerts ma
+
             INNER JOIN RaceRuns rr
-              ON ma.RunID = rr.RunID
-            INNER JOIN Registrations r
-              ON rr.RegistrationID =
-                r.RegistrationID
-            INNER JOIN Users u
-              ON r.UserID = u.UserID
-            ORDER BY
-              CASE
-                WHEN ma.AlertStatus =
-                  'PENDING'
-                THEN 0
-                ELSE 1
-              END,
-              ma.CreatedAt DESC
-          `);
+              ON rr.RunID =
+                ma.RunID
 
-      return ok(
-        res,
-        result.recordset
-      );
-    } catch (error) {
-      console.error(
-        "Load medical alerts error:",
-        error
-      );
+            WHERE ma.AlertID = ?
 
-      return fail(
-        res,
-        500,
-        "Không thể tải cảnh báo"
-      );
-    }
-  }
-);
-
-// =====================================================
-// MEDICAL DECISION
-// =====================================================
-app.post(
-  "/api/medical/decision",
-  async (req, res) => {
-    try {
-      const alertID =
-        Number(
-          req.body.alertID
-        );
-
-      const decision =
-        String(
-          req.body.decision ||
-          ""
-        ).toUpperCase();
-
-      if (
-        ![
-          "CONTINUE",
-          "STOP"
-        ].includes(decision)
-      ) {
-        return fail(
-          res,
-          400,
-          "Quyết định không hợp lệ"
-        );
-      }
-
-      const pool = await poolPromise;
-
-      const alertResult =
-        await pool
-          .request()
-          .input(
-            "AlertID",
-            sql.Int,
+            LIMIT 1
+            FOR UPDATE
+          `,
+          [
             alertID
-          )
-          .query(`
-            SELECT *
-            FROM MedicalAlerts
-            WHERE AlertID =
-              @AlertID
-          `);
+          ]
+        );
 
       if (
-        alertResult.recordset
-          .length === 0
+        alertRows.length === 0
       ) {
-        return fail(
+        await connection.rollback();
+
+        return sendError(
           res,
           404,
-          "Không tìm thấy cảnh báo"
+          "Không tìm thấy cảnh báo y tế",
+          "MEDICAL_ALERT_NOT_FOUND"
         );
       }
 
       const alert =
-        alertResult.recordset[0];
+        alertRows[0];
 
       if (
         alert.AlertStatus ===
         "RESOLVED"
       ) {
-        return ok(
+        await connection.commit();
+
+        return sendSuccess(
           res,
           {
-            decision:
-              alert
-                .MedicalDecision
+            ...alert,
+            alreadyResolved: true
           },
-          "Cảnh báo đã xử lý"
+          "Cảnh báo y tế đã được xử lý trước đó"
         );
       }
 
-      await pool
-        .request()
-        .input(
-          "AlertID",
-          sql.Int,
-          alertID
-        )
-        .input(
-          "Decision",
-          sql.VarChar(20),
-          decision
-        )
-        .query(`
+      if (
+        alert.AlertStatus !==
+        "PENDING"
+      ) {
+        await connection.rollback();
+
+        return sendError(
+          res,
+          409,
+          `Không thể xử lý cảnh báo ở trạng thái ${alert.AlertStatus}`,
+          "MEDICAL_ALERT_INVALID_STATUS"
+        );
+      }
+
+      await connection.execute(
+        `
           UPDATE MedicalAlerts
           SET
-            AlertStatus =
-              'RESOLVED',
-            MedicalDecision =
-              @Decision,
-            ResolvedAt =
-              GETDATE()
-          WHERE AlertID =
-            @AlertID
-        `);
+            AlertStatus = 'RESOLVED',
+            MedicalDecision = ?,
+            ResolvedAt = NOW(3)
+          WHERE AlertID = ?
+        `,
+        [
+          decision,
+          alertID
+        ]
+      );
+
+      if (
+        decision ===
+        "CONTINUE"
+      ) {
+        if (
+          alert.RunStatus ===
+          "STOPPED"
+        ) {
+          await connection.rollback();
+
+          return sendError(
+            res,
+            409,
+            "Lượt chạy đã STOPPED nên không thể CONTINUE.",
+            "RUN_ALREADY_STOPPED"
+          );
+        }
+
+        if (
+          alert.RunStatus ===
+          "FINISHED"
+        ) {
+          await connection.rollback();
+
+          return sendError(
+            res,
+            409,
+            "Lượt chạy đã FINISHED.",
+            "RUN_ALREADY_FINISHED"
+          );
+        }
+
+        await connection.execute(
+          `
+            UPDATE RaceRuns
+            SET RunStatus = 'RUNNING'
+            WHERE RunID = ?
+          `,
+          [
+            alert.RunID
+          ]
+        );
+      }
 
       if (
         decision ===
         "STOP"
       ) {
-        await pool
-          .request()
-          .input(
-            "RunID",
-            sql.Int,
-            alert.RunID
-          )
-          .query(`
+        if (
+          alert.RunStatus ===
+          "FINISHED"
+        ) {
+          await connection.rollback();
+
+          return sendError(
+            res,
+            409,
+            "VĐV đã FINISH nên không thể STOP lượt chạy.",
+            "RUN_ALREADY_FINISHED"
+          );
+        }
+
+        await connection.execute(
+          `
             UPDATE RaceRuns
-            SET RunStatus =
-              'STOPPED'
-            WHERE RunID = @RunID
-              AND FinishTime IS NULL
-          `);
-      } else {
-        await pool
-          .request()
-          .input(
-            "RunID",
-            sql.Int,
+            SET RunStatus = 'STOPPED'
+            WHERE RunID = ?
+          `,
+          [
             alert.RunID
-          )
-          .query(`
-            UPDATE RaceRuns
-            SET RunStatus =
-              'RUNNING'
-            WHERE RunID = @RunID
-              AND FinishTime IS NULL
-              AND RunStatus <>
-                'STOPPED'
-          `);
+          ]
+        );
       }
 
-      return ok(
+      const [updatedRows] =
+        await connection.execute(
+          `
+            SELECT
+              ma.AlertID,
+              ma.RunID,
+              ma.AlertType,
+              ma.AlertMessage,
+              ma.AlertStatus,
+              ma.MedicalDecision,
+              ma.CreatedAt,
+              ma.ResolvedAt,
+
+              rr.RunStatus
+
+            FROM MedicalAlerts ma
+
+            INNER JOIN RaceRuns rr
+              ON rr.RunID =
+                ma.RunID
+
+            WHERE ma.AlertID = ?
+
+            LIMIT 1
+          `,
+          [
+            alertID
+          ]
+        );
+
+      await connection.commit();
+
+      return sendSuccess(
         res,
-        {
-          decision
-        },
-        decision === "STOP"
-          ? "Đã yêu cầu VĐV dừng"
-          : "VĐV được phép tiếp tục"
+        updatedRows[0],
+        decision === "CONTINUE"
+          ? "Medical Team cho phép VĐV tiếp tục"
+          : "Medical Team đã dừng lượt chạy"
       );
     } catch (error) {
+      try {
+        await connection.rollback();
+      } catch (rollbackError) {
+        console.error(
+          "Medical decision rollback error:",
+          rollbackError
+        );
+      }
+
       console.error(
         "Medical decision error:",
         error
       );
 
-      return fail(
+      return sendError(
         res,
         500,
-        "Không thể xử lý cảnh báo"
+        "Không thể xử lý quyết định y tế",
+        "MEDICAL_DECISION_FAILED"
       );
+    } finally {
+      connection.release();
     }
   }
 );
 
-// =====================================================
-// FINISH
-// =====================================================
 app.post(
   "/api/race/finish",
   async (req, res) => {
+    const connection =
+      await pool.getConnection();
+
     try {
-      const bibNumber = bib(
-        req.body.bibNumber
-      );
-
-      const pool = await poolPromise;
-
-      const athlete =
-        await raceRow(
-          pool,
-          bibNumber
+      const bibNumber =
+        normalizeBib(
+          req.body?.bibNumber
         );
 
-      if (
-        !athlete ||
-        !athlete.RunID
-      ) {
-        return fail(
+      if (!bibNumber) {
+        return sendError(
+          res,
+          400,
+          "Vui lòng nhập BIB",
+          "BIB_REQUIRED"
+        );
+      }
+
+      await connection.beginTransaction();
+
+      const athlete =
+        await getRaceRow(
+          connection,
+          bibNumber,
+          true
+        );
+
+      if (!athlete) {
+        await connection.rollback();
+
+        return sendError(
           res,
           404,
-          "Không tìm thấy lượt chạy"
+          "Không tìm thấy BIB",
+          "BIB_NOT_FOUND"
+        );
+      }
+
+      if (!athlete.RunID) {
+        await connection.rollback();
+
+        return sendError(
+          res,
+          409,
+          "Không tìm thấy lượt chạy",
+          "RUN_NOT_FOUND"
         );
       }
 
@@ -2505,24 +2827,70 @@ app.post(
         athlete.RunStatus ===
         "STOPPED"
       ) {
-        return fail(
+        await connection.rollback();
+
+        return sendError(
           res,
           409,
-          "VĐV đã STOPPED/DNF"
+          "VĐV đã bị Medical Team STOP nên không thể FINISH.",
+          "RUN_STOPPED"
         );
       }
-
       if (
         athlete.RunStatus ===
         "FINISHED"
       ) {
-        return ok(
+        const [existingResults] =
+          await connection.execute(
+            `
+              SELECT
+                ResultID,
+                RunID,
+                TotalTimeSeconds,
+                ResultStatus,
+                ApprovedBy,
+                ApprovedAt,
+                CreatedAt
+              FROM Results
+              WHERE RunID = ?
+              LIMIT 1
+            `,
+            [
+              athlete.RunID
+            ]
+          );
+
+        await connection.commit();
+
+        return sendSuccess(
           res,
           {
+            bibNumber:
+              athlete.BibNumber,
+
+            FullName:
+              athlete.FullName,
+
+            RunID:
+              athlete.RunID,
+
+            RunStatus:
+              "FINISHED",
+
+            StartTime:
+              athlete.StartTime,
+
+            FinishTime:
+              athlete.FinishTime,
+
+            result:
+              existingResults[0] ||
+              null,
+
             alreadyFinished:
               true
           },
-          "VĐV đã FINISH"
+          "VĐV đã FINISH trước đó"
         );
       }
 
@@ -2530,37 +2898,87 @@ app.post(
         athlete.RunStatus !==
         "RUNNING"
       ) {
-        return fail(
+        await connection.rollback();
+
+        return sendError(
           res,
           409,
-          "VĐV không ở trạng thái RUNNING"
+          "VĐV không ở trạng thái RUNNING.",
+          "RUN_NOT_RUNNING"
         );
       }
 
-      const checkpointsResult =
-        await pool
-          .request()
-          .input(
-            "RunID",
-            sql.Int,
+      if (!athlete.StartTime) {
+        await connection.rollback();
+
+        return sendError(
+          res,
+          409,
+          "VĐV chưa START.",
+          "RUN_NOT_STARTED"
+        );
+      }
+
+      const [pendingMedicalRows] =
+        await connection.execute(
+          `
+            SELECT
+              AlertID,
+              AlertType,
+              AlertMessage,
+              AlertStatus,
+              CreatedAt
+            FROM MedicalAlerts
+            WHERE RunID = ?
+              AND AlertStatus = 'PENDING'
+            ORDER BY CreatedAt DESC
+            LIMIT 1
+          `,
+          [
             athlete.RunID
-          )
-          .query(`
-            SELECT CheckpointCode
+          ]
+        );
+
+      if (
+        pendingMedicalRows.length > 0
+      ) {
+        await connection.rollback();
+
+        return sendError(
+          res,
+          409,
+          "VĐV đang có cảnh báo y tế PENDING. Cần Medical Team quyết định CONTINUE hoặc STOP trước khi FINISH.",
+          "MEDICAL_DECISION_REQUIRED"
+        );
+      }
+
+      const [checkpointRows] =
+        await connection.execute(
+          `
+            SELECT
+              CheckpointCode
             FROM Checkpoints
-            WHERE RunID = @RunID
-              AND ScanStatus =
-                'COMPLETED'
-          `);
+            WHERE RunID = ?
+              AND ScanStatus = 'COMPLETED'
+              AND CheckpointCode IN
+              (
+                'CP01',
+                'CP02',
+                'CP03'
+              )
+            ORDER BY ScanTime
+          `,
+          [
+            athlete.RunID
+          ]
+        );
 
       const completedCheckpoints =
         new Set(
-          checkpointsResult
-            .recordset
-            .map(
-              (item) =>
-                item.CheckpointCode
-            )
+          checkpointRows.map(
+            (row) =>
+              row.CheckpointCode
+          )
         );
 
       const requiredCheckpoints = [
@@ -2569,920 +2987,841 @@ app.post(
         "CP03"
       ];
 
-      for (
-        const checkpoint
-        of requiredCheckpoints
-      ) {
-        if (
-          !completedCheckpoints.has(
-            checkpoint
-          )
-        ) {
-          return fail(
-            res,
-            409,
-            `Thiếu ${checkpoint}. Cần xử lý Exception trước khi FINISH.`,
-            "CHECKPOINT_MISSING"
-          );
-        }
-      }
-
-      const medicalResult =
-        await pool
-          .request()
-          .input(
-            "RunID",
-            sql.Int,
-            athlete.RunID
-          )
-          .query(`
-            SELECT
-              COUNT(*) AS PendingCount
-            FROM MedicalAlerts
-            WHERE RunID = @RunID
-              AND AlertStatus =
-                'PENDING'
-          `);
+      const missingCheckpoints =
+        requiredCheckpoints.filter(
+          (checkpointCode) =>
+            !completedCheckpoints.has(
+              checkpointCode
+            )
+        );
 
       if (
-        Number(
-          medicalResult
-            .recordset[0]
-            .PendingCount
-        ) > 0
+        missingCheckpoints.length > 0
       ) {
-        return fail(
+        await connection.rollback();
+
+        return sendError(
           res,
           409,
-          "Còn cảnh báo y tế chưa xử lý",
-          "MEDICAL_PENDING"
+          `Chưa hoàn thành checkpoint: ${missingCheckpoints.join(
+            ", "
+          )}`,
+          "CHECKPOINTS_INCOMPLETE"
         );
       }
-
-      await pool
-        .request()
-        .input(
-          "RunID",
-          sql.Int,
-          athlete.RunID
-        )
-        .query(`
+      await connection.execute(
+        `
           UPDATE RaceRuns
           SET
-            FinishTime =
-              COALESCE(
-                FinishTime,
-                GETDATE()
-              ),
-            RunStatus =
-              'FINISHED'
-          WHERE RunID = @RunID;
-
-          DECLARE @Seconds INT =
-          (
+            FinishTime = NOW(3),
+            RunStatus = 'FINISHED'
+          WHERE RunID = ?
+        `,
+        [
+          athlete.RunID
+        ]
+      );
+      const [timeRows] =
+        await connection.execute(
+          `
             SELECT
-              DATEDIFF(
+              RunID,
+              StartTime,
+              FinishTime,
+              RunStatus,
+
+              TIMESTAMPDIFF(
                 SECOND,
                 StartTime,
                 FinishTime
-              )
-            FROM RaceRuns
-            WHERE RunID = @RunID
-          );
+              ) AS TotalTimeSeconds
 
-          IF EXISTS (
-            SELECT 1
-            FROM Results
-            WHERE RunID = @RunID
+            FROM RaceRuns
+
+            WHERE RunID = ?
+
+            LIMIT 1
+          `,
+          [
+            athlete.RunID
+          ]
+        );
+
+      const finishedRun =
+        timeRows[0];
+
+      if (!finishedRun) {
+        await connection.rollback();
+
+        return sendError(
+          res,
+          500,
+          "Không thể lấy dữ liệu lượt chạy sau FINISH.",
+          "FINISH_RUN_NOT_FOUND"
+        );
+      }
+
+      const totalTimeSeconds =
+        Number(
+          finishedRun.TotalTimeSeconds
+        );
+
+      if (
+        !Number.isFinite(
+          totalTimeSeconds
+        ) ||
+        totalTimeSeconds < 0
+      ) {
+        await connection.rollback();
+
+        return sendError(
+          res,
+          500,
+          "Thời gian hoàn thành không hợp lệ.",
+          "INVALID_TOTAL_TIME"
+        );
+      }
+      await connection.execute(
+        `
+          INSERT INTO Results
+          (
+            RunID,
+            TotalTimeSeconds,
+            ResultStatus,
+            ApprovedBy,
+            ApprovedAt,
+            CreatedAt
           )
-          BEGIN
-            UPDATE Results
-            SET
-              TotalTimeSeconds =
-                @Seconds,
-              ResultStatus =
-                CASE
-                  WHEN ResultStatus =
-                    'OFFICIAL'
-                  THEN 'OFFICIAL'
-                  ELSE 'PENDING'
-                END
-            WHERE RunID = @RunID;
-          END
-          ELSE
-          BEGIN
-            INSERT INTO Results
-            (
+          VALUES
+          (
+            ?,
+            ?,
+            'PENDING',
+            NULL,
+            NULL,
+            NOW(3)
+          )
+
+          ON DUPLICATE KEY UPDATE
+            TotalTimeSeconds =
+              VALUES(TotalTimeSeconds)
+        `,
+        [
+          athlete.RunID,
+          totalTimeSeconds
+        ]
+      );
+
+      const [resultRows] =
+        await connection.execute(
+          `
+            SELECT
+              ResultID,
               RunID,
               TotalTimeSeconds,
-              ResultStatus
-            )
-            VALUES
-            (
-              @RunID,
-              @Seconds,
-              'PENDING'
-            );
-          END
-        `);
+              ResultStatus,
+              ApprovedBy,
+              ApprovedAt,
+              CreatedAt
+            FROM Results
+            WHERE RunID = ?
+            LIMIT 1
+          `,
+          [
+            athlete.RunID
+          ]
+        );
 
-      return ok(
+      await connection.commit();
+
+      return sendSuccess(
         res,
         {
-          bibNumber,
-          runStatus:
-            "FINISHED"
+          bibNumber:
+            athlete.BibNumber,
+
+          FullName:
+            athlete.FullName,
+
+          Distance:
+            athlete.Distance,
+
+          RunID:
+            athlete.RunID,
+
+          StartTime:
+            finishedRun.StartTime,
+
+          FinishTime:
+            finishedRun.FinishTime,
+
+          RunStatus:
+            finishedRun.RunStatus,
+
+          ResultID:
+            resultRows[0]?.ResultID ||
+            null,
+
+          TotalTimeSeconds:
+            resultRows[0]
+              ?.TotalTimeSeconds ??
+            totalTimeSeconds,
+
+          ResultStatus:
+            resultRows[0]
+              ?.ResultStatus ||
+            "PENDING"
         },
-        "FINISH thành công"
+        "FINISH thành công. Kết quả đang chờ BTC duyệt."
       );
     } catch (error) {
+      try {
+        await connection.rollback();
+      } catch (rollbackError) {
+        console.error(
+          "Finish rollback error:",
+          rollbackError
+        );
+      }
+
       console.error(
         "Finish error:",
         error
       );
 
-      return fail(
+      return sendError(
         res,
         500,
-        "Không thể FINISH"
+        "Không thể FINISH",
+        "FINISH_FAILED"
       );
+    } finally {
+      connection.release();
     }
   }
 );
 
-// =====================================================
-// APPROVE RESULT
-// =====================================================
+app.get(
+  "/api/results",
+  async (req, res) => {
+    try {
+      const status =
+        String(
+          req.query?.status || ""
+        )
+          .trim()
+          .toUpperCase();
+
+      const allowedStatuses = [
+        "PENDING",
+        "OFFICIAL"
+      ];
+
+      if (
+        status &&
+        !allowedStatuses.includes(
+          status
+        )
+      ) {
+        return sendError(
+          res,
+          400,
+          "ResultStatus không hợp lệ.",
+          "INVALID_RESULT_STATUS"
+        );
+      }
+
+      let sqlText = `
+        SELECT
+          rs.ResultID,
+          rs.RunID,
+          rs.TotalTimeSeconds,
+          rs.ResultStatus,
+          rs.ApprovedBy,
+          rs.ApprovedAt,
+          rs.CreatedAt,
+
+          rr.StartTime,
+          rr.FinishTime,
+          rr.RunStatus,
+
+          r.RegistrationID,
+          r.BibNumber,
+          r.Distance,
+
+          u.FullName
+
+        FROM Results rs
+
+        INNER JOIN RaceRuns rr
+          ON rr.RunID =
+            rs.RunID
+
+        INNER JOIN Registrations r
+          ON r.RegistrationID =
+            rr.RegistrationID
+
+        INNER JOIN Users u
+          ON u.UserID =
+            r.UserID
+      `;
+
+      const params = [];
+
+      if (status) {
+        sqlText += `
+          WHERE rs.ResultStatus = ?
+        `;
+
+        params.push(status);
+      }
+
+      sqlText += `
+        ORDER BY
+          CASE rs.ResultStatus
+            WHEN 'PENDING' THEN 1
+            WHEN 'OFFICIAL' THEN 2
+            ELSE 3
+          END,
+          rs.CreatedAt DESC
+      `;
+
+      const [rows] =
+        await pool.execute(
+          sqlText,
+          params
+        );
+
+      return sendSuccess(
+        res,
+        rows
+      );
+    } catch (error) {
+      console.error(
+        "Get results error:",
+        error
+      );
+
+      return sendError(
+        res,
+        500,
+        "Không thể tải danh sách kết quả",
+        "RESULTS_FAILED"
+      );
+    }
+  }
+);
 app.post(
   "/api/results/approve",
   async (req, res) => {
+    const connection =
+      await pool.getConnection();
+
     try {
       const resultID =
         Number(
-          req.body.resultID
+          req.body?.resultID
         );
 
-      const pool = await poolPromise;
-
-      const result =
-        await pool
-          .request()
-          .input(
-            "ResultID",
-            sql.Int,
-            resultID
-          )
-          .query(`
-            SELECT ResultStatus
-            FROM Results
-            WHERE ResultID =
-              @ResultID
-          `);
+      const approvedBy =
+        normalizeText(
+          req.body?.approvedBy
+        ) ||
+        "BTC";
 
       if (
-        result.recordset.length ===
-        0
-      ) {
-        return fail(
-          res,
-          404,
-          "Không tìm thấy kết quả"
-        );
-      }
-
-      const currentStatus =
-        result.recordset[0]
-          .ResultStatus;
-
-      if (
-        currentStatus ===
-        "OFFICIAL"
-      ) {
-        return ok(
-          res,
-          {
-            alreadyApproved:
-              true
-          },
-          "Kết quả đã OFFICIAL"
-        );
-      }
-
-      if (
-        currentStatus !==
-        "PENDING"
-      ) {
-        return fail(
-          res,
-          409,
-          "Chỉ duyệt kết quả PENDING"
-        );
-      }
-
-      await pool
-        .request()
-        .input(
-          "ResultID",
-          sql.Int,
+        !isPositiveInteger(
           resultID
         )
-        .query(`
+      ) {
+        return sendError(
+          res,
+          400,
+          "ResultID không hợp lệ",
+          "INVALID_RESULT_ID"
+        );
+      }
+
+      await connection.beginTransaction();
+
+      const [resultRows] =
+        await connection.execute(
+          `
+            SELECT
+              rs.ResultID,
+              rs.RunID,
+              rs.TotalTimeSeconds,
+              rs.ResultStatus,
+              rs.ApprovedBy,
+              rs.ApprovedAt,
+              rs.CreatedAt,
+
+              rr.RunStatus,
+
+              r.BibNumber,
+              r.Distance,
+
+              u.FullName
+
+            FROM Results rs
+
+            INNER JOIN RaceRuns rr
+              ON rr.RunID =
+                rs.RunID
+
+            INNER JOIN Registrations r
+              ON r.RegistrationID =
+                rr.RegistrationID
+
+            INNER JOIN Users u
+              ON u.UserID =
+                r.UserID
+
+            WHERE rs.ResultID = ?
+
+            LIMIT 1
+            FOR UPDATE
+          `,
+          [
+            resultID
+          ]
+        );
+
+      if (
+        resultRows.length === 0
+      ) {
+        await connection.rollback();
+
+        return sendError(
+          res,
+          404,
+          "Không tìm thấy kết quả",
+          "RESULT_NOT_FOUND"
+        );
+      }
+
+      const result =
+        resultRows[0];
+      if (
+        result.RunStatus !==
+        "FINISHED"
+      ) {
+        await connection.rollback();
+
+        return sendError(
+          res,
+          409,
+          "Chỉ có thể duyệt kết quả khi lượt chạy đã FINISHED.",
+          "RUN_NOT_FINISHED"
+        );
+      }
+      if (
+        result.ResultStatus ===
+        "OFFICIAL"
+      ) {
+        await connection.commit();
+
+        return sendSuccess(
+          res,
+          {
+            ...result,
+            alreadyOfficial: true
+          },
+          "Kết quả đã OFFICIAL trước đó"
+        );
+      }
+      if (
+        result.ResultStatus !==
+        "PENDING"
+      ) {
+        await connection.rollback();
+
+        return sendError(
+          res,
+          409,
+          `Không thể duyệt kết quả ở trạng thái ${result.ResultStatus}.`,
+          "RESULT_INVALID_STATUS"
+        );
+      }
+      await connection.execute(
+        `
           UPDATE Results
           SET
             ResultStatus =
               'OFFICIAL',
-            ApprovedAt =
-              GETDATE()
-          WHERE ResultID =
-            @ResultID
-        `);
-
-      await audit(
-        pool,
-        "APPROVE_RESULT",
-        "Result",
-        resultID,
-        "OFFICIAL",
-        "BTC"
+            ApprovedBy = ?,
+            ApprovedAt = NOW(3)
+          WHERE ResultID = ?
+        `,
+        [
+          approvedBy,
+          resultID
+        ]
       );
 
-      return ok(
+      const [updatedRows] =
+        await connection.execute(
+          `
+            SELECT
+              rs.ResultID,
+              rs.RunID,
+              rs.TotalTimeSeconds,
+              rs.ResultStatus,
+              rs.ApprovedBy,
+              rs.ApprovedAt,
+              rs.CreatedAt,
+
+              rr.StartTime,
+              rr.FinishTime,
+              rr.RunStatus,
+
+              r.BibNumber,
+              r.Distance,
+
+              u.FullName
+
+            FROM Results rs
+
+            INNER JOIN RaceRuns rr
+              ON rr.RunID =
+                rs.RunID
+
+            INNER JOIN Registrations r
+              ON r.RegistrationID =
+                rr.RegistrationID
+
+            INNER JOIN Users u
+              ON u.UserID =
+                r.UserID
+
+            WHERE rs.ResultID = ?
+
+            LIMIT 1
+          `,
+          [
+            resultID
+          ]
+        );
+
+      await connection.commit();
+
+      return sendSuccess(
         res,
-        {
-          resultID,
-          status:
-            "OFFICIAL"
-        },
-        "Đã công bố kết quả"
+        updatedRows[0],
+        "BTC đã duyệt kết quả. Kết quả hiện là OFFICIAL."
       );
     } catch (error) {
+      try {
+        await connection.rollback();
+      } catch (rollbackError) {
+        console.error(
+          "Approve result rollback error:",
+          rollbackError
+        );
+      }
+
       console.error(
         "Approve result error:",
         error
       );
 
-      return fail(
+      return sendError(
         res,
         500,
-        "Không thể duyệt kết quả"
+        "Không thể duyệt kết quả",
+        "RESULT_APPROVE_FAILED"
       );
+    } finally {
+      connection.release();
     }
   }
 );
 
-// =====================================================
-// MANUAL RESULT REVIEW
-// =====================================================
-app.post(
-  "/api/results/review",
-  async (req, res) => {
-    try {
-      const resultID =
-        Number(
-          req.body.resultID
-        );
-
-      const pool = await poolPromise;
-
-      const result =
-        await pool
-          .request()
-          .input(
-            "ResultID",
-            sql.Int,
-            resultID
-          )
-          .query(`
-            SELECT ResultStatus
-            FROM Results
-            WHERE ResultID =
-              @ResultID
-          `);
-
-      if (
-        result.recordset.length ===
-        0
-      ) {
-        return fail(
-          res,
-          404,
-          "Không tìm thấy kết quả"
-        );
-      }
-
-      if (
-        result.recordset[0]
-          .ResultStatus ===
-        "OFFICIAL"
-      ) {
-        return fail(
-          res,
-          409,
-          "Kết quả OFFICIAL phải đi qua khiếu nại"
-        );
-      }
-
-      const openReview =
-        await pool
-          .request()
-          .input(
-            "ResultID",
-            sql.Int,
-            resultID
-          )
-          .query(`
-            SELECT TOP 1 *
-            FROM ResultReviews
-            WHERE ResultID =
-              @ResultID
-              AND ReviewStatus =
-                'OPEN'
-            ORDER BY
-              ReviewID DESC
-          `);
-
-      if (
-        openReview
-          .recordset.length > 0
-      ) {
-        return ok(
-          res,
-          {
-            review:
-              openReview
-                .recordset[0],
-            alreadyInReview:
-              true
-          },
-          "Kết quả đang REVIEW"
-        );
-      }
-
-      const createReview =
-        await pool
-          .request()
-          .input(
-            "ResultID",
-            sql.Int,
-            resultID
-          )
-          .input(
-            "Reason",
-            sql.NVarChar(100),
-            req.body.reviewReason ||
-              "OTHER"
-          )
-          .input(
-            "Note",
-            sql.NVarChar(1000),
-            req.body.reviewNote ||
-              null
-          )
-          .query(`
-            INSERT INTO ResultReviews
-            (
-              ResultID,
-              ReviewSource,
-              ReviewReason,
-              ReviewNotes,
-              ReviewStatus
-            )
-            OUTPUT INSERTED.*
-            VALUES
-            (
-              @ResultID,
-              'BTC',
-              @Reason,
-              @Note,
-              'OPEN'
-            );
-
-            UPDATE Results
-            SET ResultStatus =
-              'REVIEW'
-            WHERE ResultID =
-              @ResultID;
-          `);
-
-      return res
-        .status(201)
-        .json({
-          success: true,
-          message:
-            "Đã chuyển sang REVIEW",
-          data:
-            createReview
-              .recordset[0]
-        });
-    } catch (error) {
-      console.error(
-        "Create review error:",
-        error
-      );
-
-      return fail(
-        res,
-        500,
-        "Không thể tạo REVIEW"
-      );
-    }
-  }
-);
-
-// =====================================================
-// GET REVIEWS
-// =====================================================
-app.get(
-  "/api/results/reviews",
-  async (req, res) => {
-    try {
-      const pool = await poolPromise;
-
-      const result =
-        await pool
-          .request()
-          .query(`
-            SELECT
-              rv.*,
-              rs.ResultStatus,
-              rs.TotalTimeSeconds,
-              r.BibNumber,
-              r.Distance,
-              u.FullName
-            FROM ResultReviews rv
-            INNER JOIN Results rs
-              ON rv.ResultID =
-                rs.ResultID
-            INNER JOIN RaceRuns rr
-              ON rs.RunID =
-                rr.RunID
-            INNER JOIN Registrations r
-              ON rr.RegistrationID =
-                r.RegistrationID
-            INNER JOIN Users u
-              ON r.UserID =
-                u.UserID
-            ORDER BY
-              CASE
-                WHEN rv.ReviewStatus =
-                  'OPEN'
-                THEN 0
-                ELSE 1
-              END,
-              rv.CreatedAt DESC
-          `);
-
-      return ok(
-        res,
-        result.recordset
-      );
-    } catch (error) {
-      console.error(
-        "Load reviews error:",
-        error
-      );
-
-      return fail(
-        res,
-        500,
-        "Không thể tải REVIEW"
-      );
-    }
-  }
-);
-
-// =====================================================
-// RESOLVE REVIEW
-// =====================================================
-app.post(
-  "/api/results/review/resolve",
-  async (req, res) => {
-    let transaction;
-
-    try {
-      const reviewID =
-        Number(
-          req.body.reviewID
-        );
-
-      const resolution =
-        String(
-          req.body.resolution ||
-          ""
-        ).toUpperCase();
-
-      const allowedResolutions = [
-        "APPROVE",
-        "RETURN_PENDING"
-      ];
-
-      if (
-        !allowedResolutions
-          .includes(resolution)
-      ) {
-        return fail(
-          res,
-          400,
-          "Resolution không hợp lệ"
-        );
-      }
-
-      const pool = await poolPromise;
-
-      transaction =
-        new sql.Transaction(
-          pool
-        );
-
-      await transaction.begin();
-
-      const reviewRequest =
-        new sql.Request(
-          transaction
-        );
-
-      reviewRequest.input(
-        "ReviewID",
-        sql.Int,
-        reviewID
-      );
-
-      const reviewResult =
-        await reviewRequest.query(`
-          SELECT *
-          FROM ResultReviews
-          WHERE ReviewID =
-            @ReviewID
-        `);
-
-      if (
-        reviewResult
-          .recordset.length === 0
-      ) {
-        await transaction.rollback();
-
-        return fail(
-          res,
-          404,
-          "Không tìm thấy REVIEW"
-        );
-      }
-
-      const review =
-        reviewResult.recordset[0];
-
-      const updateReviewRequest =
-        new sql.Request(
-          transaction
-        );
-
-      updateReviewRequest
-        .input(
-          "ReviewID",
-          sql.Int,
-          reviewID
-        )
-        .input(
-          "Resolution",
-          sql.VarChar(30),
-          resolution
-        )
-        .input(
-          "ResolutionNotes",
-          sql.NVarChar(1000),
-          req.body
-            .resolutionNotes ||
-            null
-        );
-
-      await updateReviewRequest.query(`
-        UPDATE ResultReviews
-        SET
-          ReviewStatus =
-            'RESOLVED',
-          Resolution =
-            @Resolution,
-          ResolutionNotes =
-            @ResolutionNotes,
-          ResolvedAt =
-            GETDATE()
-        WHERE ReviewID =
-          @ReviewID
-      `);
-
-      const nextResultStatus =
-        resolution === "APPROVE"
-          ? "OFFICIAL"
-          : "PENDING";
-
-      const updateResultRequest =
-        new sql.Request(
-          transaction
-        );
-
-      updateResultRequest
-        .input(
-          "ResultID",
-          sql.Int,
-          review.ResultID
-        )
-        .input(
-          "Status",
-          sql.VarChar(20),
-          nextResultStatus
-        );
-
-      await updateResultRequest.query(`
-        UPDATE Results
-        SET
-          ResultStatus =
-            @Status,
-          ApprovedAt =
-            CASE
-              WHEN @Status =
-                'OFFICIAL'
-              THEN GETDATE()
-              ELSE NULL
-            END
-        WHERE ResultID =
-          @ResultID
-      `);
-
-      await transaction.commit();
-
-      return ok(
-        res,
-        {
-          resolution
-        },
-        resolution ===
-          "APPROVE"
-          ? "Đã xác nhận hợp lệ và OFFICIAL"
-          : "Đã trả kết quả về PENDING"
-      );
-    } catch (error) {
-      if (transaction) {
-        try {
-          await transaction.rollback();
-        } catch (
-          rollbackError
-        ) {
-          console.error(
-            "Review rollback error:",
-            rollbackError
-          );
-        }
-      }
-
-      console.error(
-        "Resolve review error:",
-        error
-      );
-
-      return fail(
-        res,
-        500,
-        "Không thể đóng REVIEW"
-      );
-    }
-  }
-);
-
-// =====================================================
-// PUBLIC RESULT LOOKUP
-// =====================================================
 app.get(
   "/api/results/bib/:bibNumber",
   async (req, res) => {
     try {
-      const bibNumber = bib(
-        req.params.bibNumber
-      );
+      const bibNumber =
+        normalizeBib(
+          req.params.bibNumber
+        );
 
-      const pool = await poolPromise;
-
-      const result =
-        await pool
-          .request()
-          .input(
-            "Bib",
-            sql.VarChar(30),
-            bibNumber
-          )
-          .query(`
+      if (!bibNumber) {
+        return sendError(
+          res,
+          400,
+          "Vui lòng nhập BIB",
+          "BIB_REQUIRED"
+        );
+      }
+      const [athleteRows] =
+        await pool.execute(
+          `
             SELECT
-              u.FullName,
+              r.RegistrationID,
               r.BibNumber,
               r.Distance,
-              rr.StartTime,
-              rr.FinishTime,
-              rr.RunStatus,
+              r.RegistrationStatus,
+
+              u.FullName
+
+            FROM Registrations r
+
+            INNER JOIN Users u
+              ON u.UserID =
+                r.UserID
+
+            WHERE r.BibNumber = ?
+
+            LIMIT 1
+          `,
+          [
+            bibNumber
+          ]
+        );
+
+      if (
+        athleteRows.length === 0
+      ) {
+        return sendError(
+          res,
+          404,
+          "Không tìm thấy BIB",
+          "BIB_NOT_FOUND"
+        );
+      }
+      const [resultRows] =
+        await pool.execute(
+          `
+            SELECT
               rs.ResultID,
               rs.TotalTimeSeconds,
               rs.ResultStatus,
+              rs.ApprovedAt,
 
-              (
-                SELECT TOP 1
-                  ScanTime
-                FROM Checkpoints
-                WHERE RunID =
-                  rr.RunID
-                  AND CheckpointCode =
-                    'CP01'
-                  AND ScanStatus =
-                    'COMPLETED'
-              ) AS CP01Time,
+              rr.StartTime,
+              rr.FinishTime,
 
-              (
-                SELECT TOP 1
-                  ScanTime
-                FROM Checkpoints
-                WHERE RunID =
-                  rr.RunID
-                  AND CheckpointCode =
-                    'CP02'
-                  AND ScanStatus =
-                    'COMPLETED'
-              ) AS CP02Time,
+              r.BibNumber,
+              r.Distance,
 
-              (
-                SELECT TOP 1
-                  ScanTime
-                FROM Checkpoints
-                WHERE RunID =
-                  rr.RunID
-                  AND CheckpointCode =
-                    'CP03'
-                  AND ScanStatus =
-                    'COMPLETED'
-              ) AS CP03Time
+              u.FullName
 
-            FROM Registrations r
-            INNER JOIN Users u
-              ON r.UserID =
-                u.UserID
-            LEFT JOIN RaceRuns rr
-              ON r.RegistrationID =
-                rr.RegistrationID
-            LEFT JOIN Results rs
+            FROM Results rs
+
+            INNER JOIN RaceRuns rr
               ON rr.RunID =
                 rs.RunID
-            WHERE r.BibNumber =
-              @Bib
-          `);
+
+            INNER JOIN Registrations r
+              ON r.RegistrationID =
+                rr.RegistrationID
+
+            INNER JOIN Users u
+              ON u.UserID =
+                r.UserID
+
+            WHERE r.BibNumber = ?
+              AND rs.ResultStatus =
+                'OFFICIAL'
+
+            LIMIT 1
+          `,
+          [
+            bibNumber
+          ]
+        );
 
       if (
-        result.recordset.length ===
-        0
+        resultRows.length === 0
       ) {
-        return fail(
+        return sendError(
           res,
           404,
-          "Không tìm thấy BIB"
+          "Kết quả chưa được BTC công bố.",
+          "RESULT_NOT_OFFICIAL"
         );
       }
 
-      const athlete =
-        result.recordset[0];
-
-      if (
-        athlete.RunStatus !==
-        "FINISHED"
-      ) {
-        return ok(
-          res,
-          {
-            available: false,
-            reason:
-              "NOT_FINISHED",
-            athlete
-          },
-          "VĐV chưa hoàn thành"
-        );
-      }
-
-      if (
-        athlete.ResultStatus !==
-        "OFFICIAL"
-      ) {
-        return ok(
-          res,
-          {
-            available: false,
-            reason:
-              "WAITING_APPROVAL",
-            athlete
-          },
-          "Kết quả đang chờ BTC xác nhận"
-        );
-      }
-
-      return ok(
+      return sendSuccess(
         res,
-        {
-          available: true,
-          result: athlete
-        },
-        "Kết quả chính thức"
+        resultRows[0],
+        "Tra cứu kết quả thành công"
       );
     } catch (error) {
       console.error(
-        "Result lookup error:",
+        "Public result lookup error:",
         error
       );
 
-      return fail(
+      return sendError(
         res,
         500,
-        "Không thể tra cứu kết quả"
+        "Không thể tra cứu kết quả",
+        "PUBLIC_RESULT_LOOKUP_FAILED"
       );
     }
   }
 );
 
-// =====================================================
-// CREATE COMPLAINT
-// =====================================================
 app.post(
   "/api/complaints",
   async (req, res) => {
+    const connection =
+      await pool.getConnection();
+
     try {
-      const bibNumber = bib(
-        req.body.bibNumber
-      );
+      const resultID =
+        Number(
+          req.body?.resultID
+        );
 
-      const pool = await poolPromise;
+      const bibNumber =
+        normalizeBib(
+          req.body?.bibNumber
+        );
 
-      const result =
-        await pool
-          .request()
-          .input(
-            "Bib",
-            sql.VarChar(30),
-            bibNumber
-          )
-          .query(`
-            SELECT
-              rs.ResultID
-            FROM Registrations r
-            INNER JOIN RaceRuns rr
-              ON r.RegistrationID =
-                rr.RegistrationID
-            INNER JOIN Results rs
-              ON rr.RunID =
-                rs.RunID
-            WHERE r.BibNumber =
-              @Bib
-          `);
+      const complaintType =
+        normalizeText(
+          req.body?.complaintType
+        );
 
+      const complaintMessage =
+        normalizeText(
+          req.body?.complaintMessage
+        );
+
+      const contactInfo =
+        normalizeText(
+          req.body?.contactInfo
+        );
+
+  
       if (
-        result.recordset.length ===
-        0
+        !isPositiveInteger(
+          resultID
+        )
       ) {
-        return fail(
+        return sendError(
           res,
-          404,
-          "BIB chưa có kết quả để khiếu nại"
+          400,
+          "ResultID không hợp lệ",
+          "INVALID_RESULT_ID"
         );
       }
 
-      const resultID =
-        result.recordset[0]
-          .ResultID;
+      if (!bibNumber) {
+        return sendError(
+          res,
+          400,
+          "Vui lòng nhập BIB",
+          "BIB_REQUIRED"
+        );
+      }
 
-      const insertedComplaint =
-        await pool
-          .request()
-          .input(
-            "ResultID",
-            sql.Int,
+      if (!complaintType) {
+        return sendError(
+          res,
+          400,
+          "Vui lòng nhập loại khiếu nại",
+          "COMPLAINT_TYPE_REQUIRED"
+        );
+      }
+
+      if (!complaintMessage) {
+        return sendError(
+          res,
+          400,
+          "Vui lòng nhập nội dung khiếu nại",
+          "COMPLAINT_MESSAGE_REQUIRED"
+        );
+      }
+
+      await connection.beginTransaction();
+
+      const [resultRows] =
+        await connection.execute(
+          `
+            SELECT
+              rs.ResultID,
+              rs.RunID,
+              rs.ResultStatus,
+
+              r.BibNumber,
+
+              u.FullName
+
+            FROM Results rs
+
+            INNER JOIN RaceRuns rr
+              ON rr.RunID =
+                rs.RunID
+
+            INNER JOIN Registrations r
+              ON r.RegistrationID =
+                rr.RegistrationID
+
+            INNER JOIN Users u
+              ON u.UserID =
+                r.UserID
+
+            WHERE rs.ResultID = ?
+
+            LIMIT 1
+            FOR UPDATE
+          `,
+          [
             resultID
-          )
-          .input(
-            "Bib",
-            sql.VarChar(30),
-            bibNumber
-          )
-          .input(
-            "ComplaintType",
-            sql.VarChar(50),
-            req.body
-              .complaintType ||
-              "RESULT"
-          )
-          .input(
-            "ComplaintMessage",
-            sql.NVarChar(1500),
-            req.body.message ||
-              ""
-          )
-          .input(
-            "ContactInfo",
-            sql.NVarChar(200),
-            req.body.contact ||
-              null
-          )
-          .query(`
+          ]
+        );
+
+      if (
+        resultRows.length === 0
+      ) {
+        await connection.rollback();
+
+        return sendError(
+          res,
+          404,
+          "Không tìm thấy kết quả",
+          "RESULT_NOT_FOUND"
+        );
+      }
+
+      const result =
+        resultRows[0];
+
+      if (
+        normalizeBib(
+          result.BibNumber
+        ) !== bibNumber
+      ) {
+        await connection.rollback();
+
+        return sendError(
+          res,
+          409,
+          "BIB không thuộc kết quả này.",
+          "RESULT_BIB_MISMATCH"
+        );
+      }
+
+      if (
+        result.ResultStatus !==
+        "OFFICIAL"
+      ) {
+        await connection.rollback();
+
+        return sendError(
+          res,
+          409,
+          "Chỉ có thể gửi khiếu nại sau khi kết quả đã OFFICIAL.",
+          "RESULT_NOT_OFFICIAL"
+        );
+      }
+      const [insertResult] =
+        await connection.execute(
+          `
             INSERT INTO Complaints
             (
               ResultID,
@@ -3490,312 +3829,253 @@ app.post(
               ComplaintType,
               ComplaintMessage,
               ContactInfo,
-              ComplaintStatus
+              ComplaintStatus,
+              Resolution,
+              ResolutionNote,
+              CreatedAt,
+              ResolvedAt
             )
-            OUTPUT INSERTED.*
             VALUES
             (
-              @ResultID,
-              @Bib,
-              @ComplaintType,
-              @ComplaintMessage,
-              @ContactInfo,
-              'OPEN'
+              ?,
+              ?,
+              ?,
+              ?,
+              ?,
+              'OPEN',
+              NULL,
+              NULL,
+              NOW(3),
+              NULL
             )
-          `);
+          `,
+          [
+            resultID,
+            bibNumber,
+            complaintType,
+            complaintMessage,
+            contactInfo
+          ]
+        );
 
-      return res
-        .status(201)
-        .json({
-          success: true,
-          message:
-            "Đã gửi khiếu nại tới BTC",
-          data:
-            insertedComplaint
-              .recordset[0]
-        });
+      const [complaintRows] =
+        await connection.execute(
+          `
+            SELECT
+              ComplaintID,
+              ResultID,
+              BibNumber,
+              ComplaintType,
+              ComplaintMessage,
+              ContactInfo,
+              ComplaintStatus,
+              Resolution,
+              ResolutionNote,
+              CreatedAt,
+              ResolvedAt
+            FROM Complaints
+            WHERE ComplaintID = ?
+            LIMIT 1
+          `,
+          [
+            insertResult.insertId
+          ]
+        );
+
+      await connection.commit();
+
+      return sendSuccess(
+        res,
+        complaintRows[0],
+        "Đã gửi khiếu nại",
+        201
+      );
     } catch (error) {
+      try {
+        await connection.rollback();
+      } catch (rollbackError) {
+        console.error(
+          "Create complaint rollback error:",
+          rollbackError
+        );
+      }
+
       console.error(
         "Create complaint error:",
         error
       );
 
-      return fail(
+      return sendError(
         res,
         500,
-        "Không thể gửi khiếu nại"
+        "Không thể gửi khiếu nại",
+        "COMPLAINT_CREATE_FAILED"
       );
+    } finally {
+      connection.release();
     }
   }
 );
 
-// =====================================================
-// GET COMPLAINTS + RACE TIMELINE
-// =====================================================
 app.get(
   "/api/complaints",
   async (req, res) => {
     try {
-      const pool = await poolPromise;
+      const status =
+        String(
+          req.query?.status || ""
+        )
+          .trim()
+          .toUpperCase();
 
-      const result =
-        await pool
-          .request()
-          .query(`
-            SELECT
-              c.*,
-              u.FullName,
-              r.Distance,
+      const allowedStatuses = [
+        "OPEN",
+        "RESOLVED"
+      ];
 
-              rr.RunID,
+      if (
+        status &&
+        !allowedStatuses.includes(
+          status
+        )
+      ) {
+        return sendError(
+          res,
+          400,
+          "ComplaintStatus không hợp lệ.",
+          "INVALID_COMPLAINT_STATUS"
+        );
+      }
 
-              COALESCE(
-                rr.StartTime,
-                latestRun.StartTime
-              ) AS StartTime,
+      let sqlText = `
+        SELECT
+          c.ComplaintID,
+          c.ResultID,
+          c.BibNumber,
+          c.ComplaintType,
+          c.ComplaintMessage,
+          c.ContactInfo,
+          c.ComplaintStatus,
+          c.Resolution,
+          c.ResolutionNote,
+          c.CreatedAt,
+          c.ResolvedAt,
 
-              COALESCE(
-                rr.FinishTime,
-                latestRun.FinishTime
-              ) AS FinishTime,
+          rs.TotalTimeSeconds,
+          rs.ResultStatus,
 
-              COALESCE(
-                rr.RunStatus,
-                latestRun.RunStatus
-              ) AS RunStatus,
+          rr.RunID,
+          rr.StartTime,
+          rr.FinishTime,
+          rr.RunStatus,
 
-              COALESCE(
-                rs.TotalTimeSeconds,
-                latestResult.TotalTimeSeconds
-              ) AS TotalTimeSeconds,
+          r.Distance,
 
-              COALESCE(
-                rs.ResultStatus,
-                latestResult.ResultStatus,
-                'PENDING'
-              ) AS ResultStatus,
+          u.FullName
 
-              COALESCE(
-                (
-                  SELECT TOP 1
-                    cp.ScanTime
-                  FROM Checkpoints cp
-                  WHERE cp.RunID =
-                    rr.RunID
-                    AND cp.CheckpointCode =
-                      'CP01'
-                    AND cp.ScanStatus =
-                      'COMPLETED'
-                  ORDER BY
-                    cp.ScanTime DESC
-                ),
-                (
-                  SELECT TOP 1
-                    cp.ScanTime
-                  FROM Checkpoints cp
-                  WHERE cp.RunID =
-                    latestRun.RunID
-                    AND cp.CheckpointCode =
-                      'CP01'
-                    AND cp.ScanStatus =
-                      'COMPLETED'
-                  ORDER BY
-                    cp.ScanTime DESC
-                )
-              ) AS CP01Time,
+        FROM Complaints c
 
-              COALESCE(
-                (
-                  SELECT TOP 1
-                    cp.ScanTime
-                  FROM Checkpoints cp
-                  WHERE cp.RunID =
-                    rr.RunID
-                    AND cp.CheckpointCode =
-                      'CP02'
-                    AND cp.ScanStatus =
-                      'COMPLETED'
-                  ORDER BY
-                    cp.ScanTime DESC
-                ),
-                (
-                  SELECT TOP 1
-                    cp.ScanTime
-                  FROM Checkpoints cp
-                  WHERE cp.RunID =
-                    latestRun.RunID
-                    AND cp.CheckpointCode =
-                      'CP02'
-                    AND cp.ScanStatus =
-                      'COMPLETED'
-                  ORDER BY
-                    cp.ScanTime DESC
-                )
-              ) AS CP02Time,
+        INNER JOIN Results rs
+          ON rs.ResultID =
+            c.ResultID
 
-              COALESCE(
-                (
-                  SELECT TOP 1
-                    cp.ScanTime
-                  FROM Checkpoints cp
-                  WHERE cp.RunID =
-                    rr.RunID
-                    AND cp.CheckpointCode =
-                      'CP03'
-                    AND cp.ScanStatus =
-                      'COMPLETED'
-                  ORDER BY
-                    cp.ScanTime DESC
-                ),
-                (
-                  SELECT TOP 1
-                    cp.ScanTime
-                  FROM Checkpoints cp
-                  WHERE cp.RunID =
-                    latestRun.RunID
-                    AND cp.CheckpointCode =
-                      'CP03'
-                    AND cp.ScanStatus =
-                      'COMPLETED'
-                  ORDER BY
-                    cp.ScanTime DESC
-                )
-              ) AS CP03Time
+        INNER JOIN RaceRuns rr
+          ON rr.RunID =
+            rs.RunID
 
-            FROM Complaints c
+        INNER JOIN Registrations r
+          ON r.RegistrationID =
+            rr.RegistrationID
 
-            LEFT JOIN Results rs
-              ON c.ResultID =
-                rs.ResultID
+        INNER JOIN Users u
+          ON u.UserID =
+            r.UserID
+      `;
 
-            LEFT JOIN RaceRuns rr
-              ON rs.RunID =
-                rr.RunID
+      const params = [];
 
-            LEFT JOIN Registrations r
-              ON r.BibNumber =
-                c.BibNumber
+      if (status) {
+        sqlText += `
+          WHERE c.ComplaintStatus = ?
+        `;
 
-            LEFT JOIN Users u
-              ON r.UserID =
-                u.UserID
+        params.push(status);
+      }
 
-            OUTER APPLY
-            (
-              SELECT TOP 1
-                rr2.RunID,
-                rr2.StartTime,
-                rr2.FinishTime,
-                rr2.RunStatus
-              FROM RaceRuns rr2
-              WHERE rr2.RegistrationID =
-                r.RegistrationID
-              ORDER BY
-                CASE
-                  WHEN rr2.FinishTime IS NULL
-                  THEN 1
-                  ELSE 0
-                END,
-                rr2.FinishTime DESC,
-                rr2.RunID DESC
-            ) AS latestRun
+      sqlText += `
+        ORDER BY
+          CASE c.ComplaintStatus
+            WHEN 'OPEN' THEN 1
+            WHEN 'RESOLVED' THEN 2
+            ELSE 3
+          END,
+          c.CreatedAt DESC
+      `;
 
-            OUTER APPLY
-            (
-              SELECT TOP 1
-                rs2.TotalTimeSeconds,
-                rs2.ResultStatus
-              FROM Results rs2
-              WHERE rs2.RunID =
-                latestRun.RunID
-              ORDER BY
-                rs2.ResultID DESC
-            ) AS latestResult
+      const [rows] =
+        await pool.execute(
+          sqlText,
+          params
+        );
 
-            ORDER BY
-              CASE
-                WHEN c.ComplaintStatus =
-                  'OPEN'
-                THEN 0
-
-                WHEN c.ComplaintStatus =
-                  'IN_REVIEW'
-                THEN 1
-
-                ELSE 2
-              END,
-              c.CreatedAt DESC;
-          `);
-
-      return ok(
+      return sendSuccess(
         res,
-        result.recordset
+        rows
       );
     } catch (error) {
       console.error(
-        "Load complaints error:",
+        "Get complaints error:",
         error
       );
 
-      return fail(
+      return sendError(
         res,
         500,
-        `Không thể tải khiếu nại: ${error.message}`,
-        "COMPLAINT_LOAD_FAILED"
+        "Không thể tải danh sách khiếu nại",
+        "COMPLAINTS_FAILED"
       );
     }
   }
 );
 
-// =====================================================
-// RESOLVE COMPLAINT - KEEP CURRENT RESULT
-// =====================================================
 app.post(
   "/api/complaints/resolve",
   async (req, res) => {
-    let transaction;
+    const connection =
+      await pool.getConnection();
 
     try {
-      // =================================================
-      // 1. NORMALIZE REQUEST BODY
-      // Frontend cũ dùng "decision" + "note"
-      // Frontend mới có thể dùng
-      // "resolution" + "resolutionNote".
-      // API hỗ trợ cả hai.
-      // =================================================
       const complaintID =
         Number(
-          req.body
-            ?.complaintID
+          req.body?.complaintID
         );
 
       const resolution =
         String(
-          req.body?.resolution ??
-          req.body?.decision ??
-          ""
+          req.body?.resolution || ""
         )
           .trim()
           .toUpperCase();
 
       const resolutionNote =
-        String(
-          req.body
-            ?.resolutionNote ??
-          req.body?.note ??
-          ""
-        ).trim();
+        normalizeText(
+          req.body?.resolutionNote
+        );
 
-      // =================================================
-      // 2. VALIDATE COMPLAINT ID
-      // =================================================
+      const allowedResolutions = [
+        "KEEP_RESULT",
+        "RETURN_PENDING"
+      ];
+
+      // ===============================================
+      // VALIDATE
+      // ===============================================
       if (
-        !Number.isInteger(
+        !isPositiveInteger(
           complaintID
-        ) ||
-        complaintID <= 0
+        )
       ) {
-        return fail(
+        return sendError(
           res,
           400,
           "ComplaintID không hợp lệ",
@@ -3803,80 +4083,65 @@ app.post(
         );
       }
 
-      // =================================================
-      // 3. VALIDATE DECISION
-      // =================================================
       if (
-        resolution !==
-        "KEEP_RESULT"
+        !allowedResolutions.includes(
+          resolution
+        )
       ) {
-        return fail(
+        return sendError(
           res,
           400,
-          "Quyết định khiếu nại không hợp lệ",
-          "INVALID_COMPLAINT_DECISION"
+          "Resolution chỉ được là KEEP_RESULT hoặc RETURN_PENDING.",
+          "INVALID_COMPLAINT_RESOLUTION"
         );
       }
 
-      const pool =
-        await poolPromise;
+      await connection.beginTransaction();
 
-      transaction =
-        new sql.Transaction(
-          pool
-        );
-
-      await transaction.begin();
-
-      // =================================================
-      // 4. LOAD + LOCK COMPLAINT
-      // =================================================
-      const complaintRequest =
-        new sql.Request(
-          transaction
-        );
-
-      complaintRequest.input(
-        "ComplaintID",
-        sql.Int,
-        complaintID
-      );
-
-      const complaintResult =
-        await complaintRequest
-          .query(`
+      // ===============================================
+      // LOCK COMPLAINT + RESULT
+      // ===============================================
+      const [complaintRows] =
+        await connection.execute(
+          `
             SELECT
               c.ComplaintID,
               c.ResultID,
               c.BibNumber,
               c.ComplaintType,
               c.ComplaintMessage,
+              c.ContactInfo,
               c.ComplaintStatus,
               c.Resolution,
               c.ResolutionNote,
+              c.CreatedAt,
               c.ResolvedAt,
-              rs.ResultStatus
+
+              rs.ResultStatus,
+              rs.TotalTimeSeconds
+
             FROM Complaints c
-              WITH (
-                UPDLOCK,
-                HOLDLOCK
-              )
-            LEFT JOIN Results rs
-              ON c.ResultID =
-                rs.ResultID
-            WHERE c.ComplaintID =
-              @ComplaintID;
-          `);
+
+            INNER JOIN Results rs
+              ON rs.ResultID =
+                c.ResultID
+
+            WHERE c.ComplaintID = ?
+
+            LIMIT 1
+            FOR UPDATE
+          `,
+          [
+            complaintID
+          ]
+        );
 
       if (
-        complaintResult
-          .recordset.length ===
-        0
+        complaintRows.length === 0
       ) {
-        await transaction
-          .rollback();
+        await connection.rollback();
 
-        return fail(
+        return sendError(
           res,
           404,
           "Không tìm thấy khiếu nại",
@@ -3885,187 +4150,140 @@ app.post(
       }
 
       const complaint =
-        complaintResult
-          .recordset[0];
+        complaintRows[0];
 
-      // =================================================
-      // 5. ALREADY RESOLVED
-      // Cho phép frontend gọi lại mà không gây lỗi.
-      // =================================================
+      // ===============================================
+      // ALREADY RESOLVED
+      // ===============================================
       if (
-        complaint
-          .ComplaintStatus ===
+        complaint.ComplaintStatus ===
         "RESOLVED"
       ) {
-        await transaction
-          .commit();
+        await connection.commit();
 
-        return ok(
+        return sendSuccess(
           res,
           {
-            alreadyResolved:
-              true,
-
-            complaintID:
-              complaint
-                .ComplaintID,
-
-            complaintStatus:
-              complaint
-                .ComplaintStatus,
-
-            resolution:
-              complaint.Resolution,
-
-            resultID:
-              complaint.ResultID,
-
-            resultStatus:
-              complaint
-                .ResultStatus
+            ...complaint,
+            alreadyResolved: true
           },
-          "Khiếu nại này đã được xử lý trước đó"
+          "Khiếu nại đã được xử lý trước đó"
         );
       }
 
-      // =================================================
-      // 6. COMPLAINT ALREADY IN REVIEW
-      // Không được bấm "giữ nguyên" từ màn Complaint
-      // khi nó đã chuyển sang review.
-      // =================================================
       if (
-        complaint
-          .ComplaintStatus ===
-        "IN_REVIEW"
-      ) {
-        await transaction
-          .rollback();
-
-        return fail(
-          res,
-          409,
-          "Khiếu nại đã chuyển sang REVIEW. Hãy xử lý tại mục Reviews.",
-          "COMPLAINT_ALREADY_IN_REVIEW"
-        );
-      }
-
-      // =================================================
-      // 7. OTHER INVALID STATUS
-      // =================================================
-      if (
-        complaint
-          .ComplaintStatus !==
+        complaint.ComplaintStatus !==
         "OPEN"
       ) {
-        await transaction
-          .rollback();
+        await connection.rollback();
 
-        return fail(
+        return sendError(
           res,
           409,
-          `Không thể xử lý khiếu nại ở trạng thái ${complaint.ComplaintStatus}`,
-          "COMPLAINT_NOT_OPEN"
+          `Không thể xử lý khiếu nại ở trạng thái ${complaint.ComplaintStatus}.`,
+          "COMPLAINT_INVALID_STATUS"
         );
       }
 
-      // =================================================
-      // 8. CLOSE COMPLAINT
-      // Kết quả hiện tại được giữ nguyên.
-      // Chỉ Complaint chuyển OPEN -> RESOLVED.
-      // =================================================
-      const updateComplaintRequest =
-        new sql.Request(
-          transaction
-        );
+ 
+      if (
+        resolution ===
+        "KEEP_RESULT"
+      ) {
+     
+      }
 
-      updateComplaintRequest
-        .input(
-          "ComplaintID",
-          sql.Int,
-          complaintID
-        )
-        .input(
-          "Resolution",
-          sql.VarChar(30),
-          "KEEP_RESULT"
-        )
-        .input(
-          "ResolutionNote",
-          sql.NVarChar(1000),
-          resolutionNote ||
-            "BTC đã đối chiếu START, checkpoint, FINISH và xác nhận giữ nguyên kết quả."
+      if (
+        resolution ===
+        "RETURN_PENDING"
+      ) {
+        await connection.execute(
+          `
+            UPDATE Results
+            SET
+              ResultStatus = 'PENDING',
+              ApprovedBy = NULL,
+              ApprovedAt = NULL
+            WHERE ResultID = ?
+          `,
+          [
+            complaint.ResultID
+          ]
         );
+      }
 
-      await updateComplaintRequest
-        .query(`
+      await connection.execute(
+        `
           UPDATE Complaints
           SET
             ComplaintStatus =
               'RESOLVED',
-
-            Resolution =
-              @Resolution,
-
-            ResolutionNote =
-              @ResolutionNote,
-
-            ResolvedAt =
-              GETDATE()
-
-          WHERE ComplaintID =
-            @ComplaintID;
-        `);
-
-      await transaction.commit();
-
-      // =================================================
-      // 9. AUDIT LOG
-      // =================================================
-      await audit(
-        pool,
-        "COMPLAINT_KEEP_RESULT",
-        "Complaint",
-        complaintID,
-        `BIB ${complaint.BibNumber}; giữ nguyên ResultID ${complaint.ResultID}`,
-        "BTC"
+            Resolution = ?,
+            ResolutionNote = ?,
+            ResolvedAt = NOW(3)
+          WHERE ComplaintID = ?
+        `,
+        [
+          resolution,
+          resolutionNote,
+          complaintID
+        ]
       );
 
-      // =================================================
-      // 10. SUCCESS RESPONSE
-      // =================================================
-      return ok(
+      const [updatedRows] =
+        await connection.execute(
+          `
+            SELECT
+              c.ComplaintID,
+              c.ResultID,
+              c.BibNumber,
+              c.ComplaintType,
+              c.ComplaintMessage,
+              c.ContactInfo,
+              c.ComplaintStatus,
+              c.Resolution,
+              c.ResolutionNote,
+              c.CreatedAt,
+              c.ResolvedAt,
+
+              rs.TotalTimeSeconds,
+              rs.ResultStatus,
+              rs.ApprovedBy,
+              rs.ApprovedAt
+
+            FROM Complaints c
+
+            INNER JOIN Results rs
+              ON rs.ResultID =
+                c.ResultID
+
+            WHERE c.ComplaintID = ?
+
+            LIMIT 1
+          `,
+          [
+            complaintID
+          ]
+        );
+
+      await connection.commit();
+
+      return sendSuccess(
         res,
-        {
-          complaintID,
-
-          complaintStatus:
-            "RESOLVED",
-
-          resolution:
-            "KEEP_RESULT",
-
-          resultID:
-            complaint.ResultID,
-
-          resultStatus:
-            complaint
-              .ResultStatus
-        },
-        "Đã xác minh: kết quả đúng, giữ nguyên kết quả và đóng khiếu nại"
+        updatedRows[0],
+        resolution ===
+          "KEEP_RESULT"
+          ? "Đã xử lý khiếu nại và giữ nguyên kết quả."
+          : "Đã xử lý khiếu nại và đưa kết quả về PENDING."
       );
     } catch (error) {
-      if (transaction) {
-        try {
-          await transaction
-            .rollback();
-        } catch (
+      try {
+        await connection.rollback();
+      } catch (rollbackError) {
+        console.error(
+          "Resolve complaint rollback error:",
           rollbackError
-        ) {
-          console.error(
-            "Resolve complaint rollback error:",
-            rollbackError
-          );
-        }
+        );
       }
 
       console.error(
@@ -4073,447 +4291,56 @@ app.post(
         error
       );
 
-      return fail(
+      return sendError(
         res,
         500,
-        `Không thể xử lý khiếu nại: ${error.message}`,
+        "Không thể xử lý khiếu nại",
         "COMPLAINT_RESOLVE_FAILED"
       );
+    } finally {
+      connection.release();
     }
   }
 );
 
-// =====================================================
-// COMPLAINT -> RESULT REVIEW
-// =====================================================
-app.post(
-  "/api/complaints/review",
-  async (req, res) => {
-    let transaction;
-
-    try {
-      const complaintID =
-        Number(
-          req.body
-            ?.complaintID
-        );
-
-      if (
-        !Number.isInteger(
-          complaintID
-        ) ||
-        complaintID <= 0
-      ) {
-        return fail(
-          res,
-          400,
-          "ComplaintID không hợp lệ",
-          "INVALID_COMPLAINT_ID"
-        );
-      }
-
-      const pool =
-        await poolPromise;
-
-      transaction =
-        new sql.Transaction(
-          pool
-        );
-
-      await transaction.begin();
-
-      // =================================================
-      // LOAD + LOCK COMPLAINT
-      // =================================================
-      const complaintRequest =
-        new sql.Request(
-          transaction
-        );
-
-      complaintRequest.input(
-        "ComplaintID",
-        sql.Int,
-        complaintID
-      );
-
-      const complaintResult =
-        await complaintRequest
-          .query(`
-            SELECT
-              c.ComplaintID,
-              c.ResultID,
-              c.BibNumber,
-              c.ComplaintType,
-              c.ComplaintMessage,
-              c.ComplaintStatus,
-              rs.ResultStatus
-            FROM Complaints c
-              WITH (
-                UPDLOCK,
-                HOLDLOCK
-              )
-            INNER JOIN Results rs
-              ON c.ResultID =
-                rs.ResultID
-            WHERE c.ComplaintID =
-              @ComplaintID
-          `);
-
-      if (
-        complaintResult
-          .recordset.length ===
-        0
-      ) {
-        await transaction
-          .rollback();
-
-        return fail(
-          res,
-          404,
-          "Không tìm thấy khiếu nại",
-          "COMPLAINT_NOT_FOUND"
-        );
-      }
-
-      const complaint =
-        complaintResult
-          .recordset[0];
-
-      // =================================================
-      // ALREADY IN REVIEW
-      // =================================================
-      if (
-        complaint
-          .ComplaintStatus ===
-        "IN_REVIEW"
-      ) {
-        const existingRequest =
-          new sql.Request(
-            transaction
-          );
-
-        existingRequest.input(
-          "ResultID",
-          sql.Int,
-          complaint.ResultID
-        );
-
-        const existingReview =
-          await existingRequest
-            .query(`
-              SELECT TOP 1 *
-              FROM ResultReviews
-              WHERE ResultID =
-                @ResultID
-                AND ReviewStatus =
-                  'OPEN'
-              ORDER BY
-                ReviewID DESC
-            `);
-
-        await transaction
-          .commit();
-
-        return ok(
-          res,
-          {
-            alreadyInReview:
-              true,
-
-            complaintID:
-              complaint
-                .ComplaintID,
-
-            resultID:
-              complaint.ResultID,
-
-            review:
-              existingReview
-                .recordset[0] ||
-              null
-          },
-          "Khiếu nại đã được chuyển sang REVIEW trước đó"
-        );
-      }
-
-      if (
-        complaint
-          .ComplaintStatus !==
-        "OPEN"
-      ) {
-        await transaction
-          .rollback();
-
-        return fail(
-          res,
-          409,
-          `Không thể chuyển khiếu nại ở trạng thái ${complaint.ComplaintStatus}`,
-          "COMPLAINT_NOT_OPEN"
-        );
-      }
-
-      // =================================================
-      // FIND EXISTING OPEN REVIEW
-      // =================================================
-      const findReviewRequest =
-        new sql.Request(
-          transaction
-        );
-
-      findReviewRequest.input(
-        "ResultID",
-        sql.Int,
-        complaint.ResultID
-      );
-
-      const openReviewResult =
-        await findReviewRequest
-          .query(`
-            SELECT TOP 1 *
-            FROM ResultReviews
-              WITH (
-                UPDLOCK,
-                HOLDLOCK
-              )
-            WHERE ResultID =
-              @ResultID
-              AND ReviewStatus =
-                'OPEN'
-            ORDER BY
-              ReviewID DESC
-          `);
-
-      let review;
-
-      if (
-        openReviewResult
-          .recordset.length > 0
-      ) {
-        review =
-          openReviewResult
-            .recordset[0];
-      } else {
-        // ===============================================
-        // CREATE REVIEW
-        // ===============================================
-        const createReviewRequest =
-          new sql.Request(
-            transaction
-          );
-
-        createReviewRequest
-          .input(
-            "ResultID",
-            sql.Int,
-            complaint.ResultID
-          )
-          .input(
-            "ReviewSource",
-            sql.VarChar(20),
-            "ATHLETE"
-          )
-          .input(
-            "ReviewReason",
-            sql.NVarChar(100),
-            "ATHLETE_COMPLAINT"
-          )
-          .input(
-            "ReviewNotes",
-            sql.NVarChar(1000),
-            complaint
-              .ComplaintMessage ||
-              null
-          );
-
-        const createdReview =
-          await createReviewRequest
-            .query(`
-              INSERT INTO ResultReviews
-              (
-                ResultID,
-                ReviewSource,
-                ReviewReason,
-                ReviewNotes,
-                ReviewStatus
-              )
-              OUTPUT INSERTED.*
-              VALUES
-              (
-                @ResultID,
-                @ReviewSource,
-                @ReviewReason,
-                @ReviewNotes,
-                'OPEN'
-              )
-            `);
-
-        review =
-          createdReview
-            .recordset[0];
-      }
-
-      // =================================================
-      // RESULT -> REVIEW
-      // =================================================
-      const resultRequest =
-        new sql.Request(
-          transaction
-        );
-
-      resultRequest.input(
-        "ResultID",
-        sql.Int,
-        complaint.ResultID
-      );
-
-      await resultRequest.query(`
-        UPDATE Results
-        SET ResultStatus =
-          'REVIEW'
-        WHERE ResultID =
-          @ResultID
-      `);
-
-      // =================================================
-      // COMPLAINT -> IN_REVIEW
-      // =================================================
-      const complaintUpdateRequest =
-        new sql.Request(
-          transaction
-        );
-
-      complaintUpdateRequest.input(
-        "ComplaintID",
-        sql.Int,
-        complaintID
-      );
-
-      await complaintUpdateRequest
-        .query(`
-          UPDATE Complaints
-          SET ComplaintStatus =
-            'IN_REVIEW'
-          WHERE ComplaintID =
-            @ComplaintID
-        `);
-
-      await transaction.commit();
-
-      await audit(
-        pool,
-        "COMPLAINT_TO_REVIEW",
-        "Complaint",
-        complaintID,
-        `BIB ${complaint.BibNumber}; ResultID ${complaint.ResultID}; ReviewID ${review?.ReviewID ?? "N/A"}`,
-        "BTC"
-      );
-
-      return ok(
-        res,
-        {
-          complaintID:
-            complaint
-              .ComplaintID,
-
-          complaintStatus:
-            "IN_REVIEW",
-
-          resultID:
-            complaint.ResultID,
-
-          resultStatus:
-            "REVIEW",
-
-          review
-        },
-        "Đã chuyển khiếu nại sang REVIEW"
-      );
-    } catch (error) {
-      if (transaction) {
-        try {
-          await transaction
-            .rollback();
-        } catch (
-          rollbackError
-        ) {
-          console.error(
-            "Complaint review rollback error:",
-            rollbackError
-          );
-        }
-      }
-
-      console.error(
-        "Complaint -> Review error:",
-        error
-      );
-
-      return fail(
-        res,
-        500,
-        `Không thể chuyển khiếu nại sang REVIEW: ${error.message}`,
-        "COMPLAINT_REVIEW_FAILED"
-      );
-    }
+app.use(
+  (req, res) => {
+    return sendError(
+      res,
+      404,
+      `Không tìm thấy API: ${req.method} ${req.originalUrl}`,
+      "API_NOT_FOUND"
+    );
   }
 );
 
-// =====================================================
-// AUDIT LOGS
-// =====================================================
-app.get(
-  "/api/audit-logs",
-  async (req, res) => {
-    try {
-      const pool = await poolPromise;
+async function startServer() {
+  try {
+    await testDatabaseConnection();
 
-      const result =
-        await pool
-          .request()
-          .query(`
-            SELECT TOP 100 *
-            FROM AuditLogs
-            ORDER BY CreatedAt DESC
-          `);
+    app.listen(
+      PORT,
+      () => {
+        console.log(
+          `🚀 Race Timing Pro API http://localhost:${PORT}`
+        );
 
-      return ok(
-        res,
-        result.recordset
-      );
-    } catch (error) {
-      console.error(
-        "Load audit logs error:",
-        error
-      );
-
-      return fail(
-        res,
-        500,
-        "Không thể tải audit log"
-      );
-    }
-  }
-);
-
-// =====================================================
-// SERVER STARTUP
-// =====================================================
-app.listen(
-  PORT,
-  async () => {
-    console.log(
-      `🚀 Race Timing Pro API http://localhost:${PORT}`
+        console.log(
+          "✅ Database engine: MySQL"
+        );
+      }
+    );
+  } catch (error) {
+    console.error(
+      "❌ Không thể khởi động Race Timing Pro API:"
     );
 
-    try {
-      await ensureDatabaseCompatibility();
-    } catch (error) {
-      console.error(
-        "⚠️ Database compatibility check failed:",
-        error.message
-      );
-    }
+    console.error(
+      error
+    );
 
-    await ensureDemoAdminAccounts();
+    process.exit(1);
   }
-);
+}
+
+startServer();
