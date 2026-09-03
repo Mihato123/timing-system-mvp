@@ -2,6 +2,10 @@
 -- RACE TIMING PRO
 -- DATABASE INITIALIZATION
 -- Database: MySQL 8.x
+-- Purpose:
+--   - Create the core database structure for Race Timing Pro
+--   - Follow PRD / core business flow
+--   - Keep exactly 7 main tables
 -- =========================================================
 
 CREATE DATABASE IF NOT EXISTS race_management
@@ -13,9 +17,9 @@ USE race_management;
 
 -- =========================================================
 -- 1. USERS
--- Thông tin cá nhân vận động viên
+-- Thông tin cá nhân của vận động viên
 -- =========================================================
-CREATE TABLE Users (
+CREATE TABLE IF NOT EXISTS Users (
     UserID INT AUTO_INCREMENT PRIMARY KEY,
 
     FullName VARCHAR(150) NOT NULL,
@@ -30,9 +34,13 @@ CREATE TABLE Users (
 
 -- =========================================================
 -- 2. REGISTRATIONS
--- Đăng ký giải, BIB và khai báo sức khỏe
+-- Thông tin đăng ký giải, BIB, cự ly và khai báo sức khỏe
+--
+-- RegistrationStatus:
+--   REGISTERED
+--   CHECKED_IN
 -- =========================================================
-CREATE TABLE Registrations (
+CREATE TABLE IF NOT EXISTS Registrations (
     RegistrationID INT AUTO_INCREMENT PRIMARY KEY,
 
     UserID INT NOT NULL,
@@ -43,6 +51,10 @@ CREATE TABLE Registrations (
     HasMedicalCondition BOOLEAN NOT NULL DEFAULT FALSE,
     MedicalCondition VARCHAR(500) NULL,
     MedicalNotes VARCHAR(1000) NULL,
+
+    -- VĐV bắt buộc xác nhận thỏa thuận Waiver khi đăng ký
+    WaiverAccepted BOOLEAN NOT NULL DEFAULT FALSE,
+    WaiverAcceptedAt DATETIME(3) NULL,
 
     RegistrationStatus VARCHAR(30)
         NOT NULL DEFAULT 'REGISTERED',
@@ -60,8 +72,15 @@ CREATE TABLE Registrations (
 -- =========================================================
 -- 3. RACE RUNS
 -- Lượt chạy của vận động viên
+--
+-- RunStatus:
+--   NOT_STARTED
+--   CHECKED_IN
+--   RUNNING
+--   FINISHED
+--   STOPPED
 -- =========================================================
-CREATE TABLE RaceRuns (
+CREATE TABLE IF NOT EXISTS RaceRuns (
     RunID INT AUTO_INCREMENT PRIMARY KEY,
 
     RegistrationID INT NOT NULL UNIQUE,
@@ -84,10 +103,17 @@ CREATE TABLE RaceRuns (
 
 -- =========================================================
 -- 4. CHECKPOINTS
--- Thời gian VĐV đi qua CP01 / CP02 / CP03
--- ScanTime được backend truyền vào khi ghi nhận checkpoint
+-- Ghi nhận thời gian vận động viên đi qua checkpoint
+--
+-- CheckpointCode:
+--   CP01
+--   CP02
+--   CP03
+--
+-- ScanStatus:
+--   COMPLETED
 -- =========================================================
-CREATE TABLE Checkpoints (
+CREATE TABLE IF NOT EXISTS Checkpoints (
     CheckpointID INT AUTO_INCREMENT PRIMARY KEY,
 
     RunID INT NOT NULL,
@@ -114,9 +140,20 @@ CREATE TABLE Checkpoints (
 -- =========================================================
 -- 5. MEDICAL ALERTS
 -- Sự cố y tế thực tế phát sinh trong quá trình chạy
--- Bệnh nền khai báo ban đầu nằm ở Registrations
+--
+-- Lưu ý:
+--   - Bệnh nền được khai báo ở Registrations
+--   - MedicalAlerts chỉ lưu sự cố thực tế
+--
+-- AlertStatus:
+--   PENDING
+--   RESOLVED
+--
+-- MedicalDecision:
+--   CONTINUE
+--   STOP
 -- =========================================================
-CREATE TABLE MedicalAlerts (
+CREATE TABLE IF NOT EXISTS MedicalAlerts (
     AlertID INT AUTO_INCREMENT PRIMARY KEY,
 
     RunID INT NOT NULL,
@@ -142,9 +179,17 @@ CREATE TABLE MedicalAlerts (
 
 -- =========================================================
 -- 6. RESULTS
--- FINISH -> PENDING -> BTC APPROVE -> OFFICIAL
+-- Luồng:
+--   FINISH
+--   -> PENDING
+--   -> BTC APPROVE
+--   -> OFFICIAL
+--
+-- ResultStatus:
+--   PENDING
+--   OFFICIAL
 -- =========================================================
-CREATE TABLE Results (
+CREATE TABLE IF NOT EXISTS Results (
     ResultID INT AUTO_INCREMENT PRIMARY KEY,
 
     RunID INT NOT NULL UNIQUE,
@@ -170,8 +215,16 @@ CREATE TABLE Results (
 -- =========================================================
 -- 7. COMPLAINTS
 -- Khiếu nại kết quả từ vận động viên
+--
+-- ComplaintStatus:
+--   OPEN
+--   RESOLVED
+--
+-- Resolution:
+--   KEEP_RESULT
+--   RETURN_PENDING
 -- =========================================================
-CREATE TABLE Complaints (
+CREATE TABLE IF NOT EXISTS Complaints (
     ComplaintID INT AUTO_INCREMENT PRIMARY KEY,
 
     ResultID INT NOT NULL,
@@ -203,19 +256,19 @@ CREATE TABLE Complaints (
 -- INDEXES
 -- =========================================================
 
-CREATE INDEX IDX_Registrations_Status
+CREATE INDEX IF NOT EXISTS IDX_Registrations_Status
     ON Registrations(RegistrationStatus);
 
-CREATE INDEX IDX_RaceRuns_Status
+CREATE INDEX IF NOT EXISTS IDX_RaceRuns_Status
     ON RaceRuns(RunStatus);
 
-CREATE INDEX IDX_MedicalAlerts_Status
+CREATE INDEX IF NOT EXISTS IDX_MedicalAlerts_Status
     ON MedicalAlerts(AlertStatus);
 
-CREATE INDEX IDX_Results_Status
+CREATE INDEX IF NOT EXISTS IDX_Results_Status
     ON Results(ResultStatus);
 
-CREATE INDEX IDX_Complaints_Status
+CREATE INDEX IF NOT EXISTS IDX_Complaints_Status
     ON Complaints(ComplaintStatus);
 
 

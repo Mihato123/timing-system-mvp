@@ -209,7 +209,7 @@ app.get(
 );
 
 app.get(
-  "/api/athletes/:bib",
+  "/api/public/athletes/:bib",
   async (req, res) => {
     try {
       const bibNumber =
@@ -217,80 +217,161 @@ app.get(
           req.params.bib
         );
 
+      if (!bibNumber) {
+        return sendError(
+          res,
+          400,
+          "Vui lòng nhập BIB",
+          "BIB_REQUIRED"
+        );
+      }
+
       const [rows] =
         await pool.execute(
           `
             SELECT
-              u.UserID,
               u.FullName,
-              u.DateOfBirth,
               u.Phone,
               u.Email,
               u.Gender,
 
-              r.RegistrationID,
               r.BibNumber,
               r.Distance,
-              r.HasMedicalCondition,
-              r.MedicalCondition,
-              r.MedicalNotes,
               r.RegistrationStatus,
 
-              rr.RunID,
-              rr.StartTime,
-              rr.FinishTime,
-              rr.RunStatus,
+              rr.RunStatus
 
-              rs.ResultID,
-              rs.TotalTimeSeconds,
-              rs.ResultStatus,
-              rs.ApprovedBy,
-              rs.ApprovedAt
+            FROM Registrations r
 
-            FROM Users u
-
-            INNER JOIN Registrations r
-              ON r.UserID =
-                u.UserID
+            INNER JOIN Users u
+              ON u.UserID =
+                r.UserID
 
             LEFT JOIN RaceRuns rr
               ON rr.RegistrationID =
                 r.RegistrationID
 
-            LEFT JOIN Results rs
-              ON rs.RunID =
-                rr.RunID
-
             WHERE r.BibNumber = ?
-
             LIMIT 1
           `,
-          [bibNumber]
+          [
+            bibNumber
+          ]
         );
 
       if (rows.length === 0) {
         return sendError(
           res,
           404,
-          "Không tìm thấy BIB",
+          "Không tìm thấy VĐV",
           "BIB_NOT_FOUND"
         );
       }
 
+      const athlete =
+        rows[0];
+
+      const maskPhone = (phone) => {
+        if (!phone) {
+          return null;
+        }
+
+        const value =
+          String(phone);
+
+        if (value.length <= 6) {
+          return "***";
+        }
+
+        return (
+          value.slice(0, 3) +
+          "****" +
+          value.slice(-3)
+        );
+      };
+
+      const maskEmail = (email) => {
+        if (!email) {
+          return null;
+        }
+
+        const value =
+          String(email);
+
+        const atIndex =
+          value.indexOf("@");
+
+        if (atIndex <= 0) {
+          return "***";
+        }
+
+        const username =
+          value.slice(
+            0,
+            atIndex
+          );
+
+        const domain =
+          value.slice(
+            atIndex
+          );
+
+        const visiblePart =
+          username.length <= 2
+            ? username.charAt(0)
+            : username.slice(0, 3);
+
+        return (
+          visiblePart +
+          "***" +
+          domain
+        );
+      };
+
       return sendSuccess(
         res,
-        rows[0]
+        {
+          fullName:
+            athlete.FullName,
+
+          bibNumber:
+            athlete.BibNumber,
+
+          distance:
+            athlete.Distance,
+
+          gender:
+            athlete.Gender,
+
+          phone:
+            maskPhone(
+              athlete.Phone
+            ),
+
+          email:
+            maskEmail(
+              athlete.Email
+            ),
+
+          registrationStatus:
+            athlete.RegistrationStatus,
+
+          runStatus:
+            athlete.RunStatus
+        },
+        "Tra cứu VĐV thành công"
       );
     } catch (error) {
       console.error(
-        "Get athlete error:",
+        "Public athlete lookup error:",
         error
       );
 
       return sendError(
         res,
         500,
-        "Có lỗi khi tìm VĐV"
+        "Không thể tra cứu VĐV",
+        "PUBLIC_ATHLETE_LOOKUP_FAILED"
       );
     }
   }
@@ -556,16 +637,30 @@ app.put(
             "MEDICAL_CONDITION_REQUIRED"
           );
         }
+        if (!waiverAccepted) {
+  return sendError(
+    res,
+    400,
+    "Vui lòng đọc và đồng ý với Điều khoản tham gia giải trước khi đăng ký.",
+    "WAIVER_REQUIRED"
+  );
+}
 
         await connection.execute(
           `
             UPDATE Registrations
-            SET
-              Distance = ?,
-              HasMedicalCondition = ?,
-              MedicalCondition = ?,
-              MedicalNotes = ?
-            WHERE RegistrationID = ?
+SET
+  Distance = ?,
+  HasMedicalCondition = ?,
+  MedicalCondition = ?,
+  MedicalNotes = ?,
+  WaiverAccepted = 1,
+  WaiverAcceptedAt =
+    COALESCE(
+      WaiverAcceptedAt,
+      NOW(3)
+    )
+WHERE RegistrationID = ?
           `,
           [
             nextDistance,
@@ -708,10 +803,14 @@ app.post(
           req.body?.medicalCondition
         );
 
-      const medicalNotes =
-        normalizeText(
-          req.body?.medicalNotes
-        );
+     const medicalNotes =
+  normalizeText(
+    req.body?.medicalNotes
+  );
+  const waiverAccepted =
+  toBoolean(
+    req.body?.waiverAccepted
+  );
       if (
         !fullName ||
         !phone ||
@@ -943,26 +1042,31 @@ app.post(
         const [insertedRegistration] =
           await connection.execute(
             `
-              INSERT INTO Registrations
-              (
-                UserID,
-                Distance,
-                BibNumber,
-                HasMedicalCondition,
-                MedicalCondition,
-                MedicalNotes,
-                RegistrationStatus
-              )
-              VALUES
-              (
-                ?,
-                ?,
-                ?,
-                ?,
-                ?,
-                ?,
-                'REGISTERED'
-              )
+            INSERT INTO Registrations
+(
+  UserID,
+  Distance,
+  BibNumber,
+  HasMedicalCondition,
+  MedicalCondition,
+  MedicalNotes,
+  WaiverAccepted,
+  WaiverAcceptedAt,
+  RegistrationStatus
+)
+VALUES
+(
+  ?,
+  ?,
+  ?,
+  ?,
+  ?,
+  ?,
+  1,
+  NOW(3),
+  'REGISTERED'
+)
+              
             `,
             [
               userID,
@@ -1145,7 +1249,10 @@ app.get(
     }
   }
 );
-
+// =====================================================
+// CHECK-IN 1 BIB
+// REGISTERED -> CHECKED_IN
+// =====================================================
 app.post(
   "/api/check-in",
   async (req, res) => {
@@ -1178,7 +1285,12 @@ app.post(
               r.Distance,
               r.RegistrationStatus,
 
-              u.FullName
+              u.FullName,
+
+              rr.RunID,
+              rr.RunStatus,
+              rr.StartTime,
+              rr.FinishTime
 
             FROM Registrations r
 
@@ -1186,12 +1298,18 @@ app.post(
               ON u.UserID =
                 r.UserID
 
+            LEFT JOIN RaceRuns rr
+              ON rr.RegistrationID =
+                r.RegistrationID
+
             WHERE r.BibNumber = ?
 
             LIMIT 1
             FOR UPDATE
           `,
-          [bibNumber]
+          [
+            bibNumber
+          ]
         );
 
       if (rows.length === 0) {
@@ -1208,21 +1326,52 @@ app.post(
       const athlete =
         rows[0];
 
-
+      // Đã check-in trước đó
       if (
         athlete.RegistrationStatus ===
         "CHECKED_IN"
       ) {
+        await connection.execute(
+          `
+            INSERT INTO RaceRuns
+            (
+              RegistrationID,
+              RunStatus
+            )
+            VALUES
+            (
+              ?,
+              'CHECKED_IN'
+            )
+
+            ON DUPLICATE KEY UPDATE
+              RunStatus =
+                CASE
+                  WHEN StartTime IS NULL
+                    AND FinishTime IS NULL
+                  THEN 'CHECKED_IN'
+                  ELSE RunStatus
+                END
+          `,
+          [
+            athlete.RegistrationID
+          ]
+        );
+
         const [runRows] =
           await connection.execute(
             `
               SELECT
                 RunID,
-                RunStatus,
+                RegistrationID,
                 StartTime,
-                FinishTime
+                FinishTime,
+                RunStatus
+
               FROM RaceRuns
+
               WHERE RegistrationID = ?
+
               LIMIT 1
             `,
             [
@@ -1235,28 +1384,24 @@ app.post(
         return sendSuccess(
           res,
           {
-            ...athlete,
+            bibNumber:
+              athlete.BibNumber,
 
-            RunID:
-              runRows[0]?.RunID ||
-              null,
+            FullName:
+              athlete.FullName,
 
-            RunStatus:
-              runRows[0]?.RunStatus ||
+            Distance:
+              athlete.Distance,
+
+            RegistrationStatus:
               "CHECKED_IN",
 
-            StartTime:
-              runRows[0]?.StartTime ||
-              null,
-
-            FinishTime:
-              runRows[0]?.FinishTime ||
-              null,
+            ...runRows[0],
 
             alreadyCheckedIn:
               true
           },
-          "VĐV đã check-in trước đó"
+          "VĐV đã CHECK-IN trước đó"
         );
       }
 
@@ -1269,7 +1414,7 @@ app.post(
         return sendError(
           res,
           409,
-          `Không thể check-in ở trạng thái ${athlete.RegistrationStatus}`,
+          `Không thể check-in khi đăng ký đang ở trạng thái ${athlete.RegistrationStatus}.`,
           "CHECK_IN_INVALID_STATUS"
         );
       }
@@ -1277,16 +1422,17 @@ app.post(
       await connection.execute(
         `
           UPDATE Registrations
+
           SET
             RegistrationStatus =
               'CHECKED_IN'
+
           WHERE RegistrationID = ?
         `,
         [
           athlete.RegistrationID
         ]
       );
-
 
       await connection.execute(
         `
@@ -1324,8 +1470,11 @@ app.post(
               StartTime,
               FinishTime,
               RunStatus
+
             FROM RaceRuns
+
             WHERE RegistrationID = ?
+
             LIMIT 1
           `,
           [
@@ -1338,26 +1487,19 @@ app.post(
       return sendSuccess(
         res,
         {
-          ...athlete,
+          bibNumber:
+            athlete.BibNumber,
+
+          FullName:
+            athlete.FullName,
+
+          Distance:
+            athlete.Distance,
 
           RegistrationStatus:
             "CHECKED_IN",
 
-          RunID:
-            runRows[0]?.RunID ||
-            null,
-
-          RunStatus:
-            runRows[0]?.RunStatus ||
-            "CHECKED_IN",
-
-          StartTime:
-            runRows[0]?.StartTime ||
-            null,
-
-          FinishTime:
-            runRows[0]?.FinishTime ||
-            null
+          ...runRows[0]
         },
         "Check-in thành công"
       );
@@ -1379,7 +1521,7 @@ app.post(
       return sendError(
         res,
         500,
-        "Có lỗi khi check-in",
+        "Không thể check-in VĐV",
         "CHECK_IN_FAILED"
       );
     } finally {
@@ -1388,6 +1530,340 @@ app.post(
   }
 );
 
+
+// =====================================================
+// CHECK-IN DANH SÁCH
+//
+// Có thể gửi:
+// {
+//   "bibNumbers": [
+//     "BIB001",
+//     "BIB002",
+//     "BIB003"
+//   ]
+// }
+//
+// Hoặc:
+// {
+//   "bibNumbers": "BIB001 BIB002 BIB003"
+// }
+// =====================================================
+app.post(
+  "/api/check-in/bulk",
+  async (req, res) => {
+    const connection =
+      await pool.getConnection();
+
+    try {
+      const rawBibNumbers =
+        Array.isArray(
+          req.body?.bibNumbers
+        )
+          ? req.body.bibNumbers
+          : String(
+              req.body?.bibNumbers ||
+              ""
+            ).split(
+              /[\s,;]+/
+            );
+
+      const bibNumbers = [
+        ...new Set(
+          rawBibNumbers
+            .map(
+              (value) =>
+                normalizeBib(
+                  value
+                )
+            )
+            .filter(Boolean)
+        )
+      ];
+
+      if (
+        bibNumbers.length === 0
+      ) {
+        return sendError(
+          res,
+          400,
+          "Vui lòng nhập danh sách BIB cần check-in.",
+          "BULK_BIB_REQUIRED"
+        );
+      }
+
+      // đủ cho case chị Sarah nói 50-100
+      if (
+        bibNumbers.length > 200
+      ) {
+        return sendError(
+          res,
+          400,
+          "Mỗi lần chỉ check-in tối đa 200 BIB.",
+          "BULK_BIB_LIMIT"
+        );
+      }
+
+      await connection.beginTransaction();
+
+      const placeholders =
+        bibNumbers
+          .map(() => "?")
+          .join(", ");
+
+      const [rows] =
+        await connection.execute(
+          `
+            SELECT
+              r.RegistrationID,
+              r.BibNumber,
+              r.RegistrationStatus,
+
+              u.FullName,
+
+              rr.RunID,
+              rr.RunStatus,
+              rr.StartTime,
+              rr.FinishTime
+
+            FROM Registrations r
+
+            INNER JOIN Users u
+              ON u.UserID =
+                r.UserID
+
+            LEFT JOIN RaceRuns rr
+              ON rr.RegistrationID =
+                r.RegistrationID
+
+            WHERE r.BibNumber
+              IN (${placeholders})
+
+            FOR UPDATE
+          `,
+          bibNumbers
+        );
+
+      const athleteMap =
+        new Map(
+          rows.map(
+            (row) => [
+              normalizeBib(
+                row.BibNumber
+              ),
+              row
+            ]
+          )
+        );
+
+      const eligible = [];
+      const results = [];
+
+      for (
+        const bibNumber
+        of bibNumbers
+      ) {
+        const athlete =
+          athleteMap.get(
+            bibNumber
+          );
+
+        if (!athlete) {
+          results.push({
+            bibNumber,
+            status:
+              "NOT_FOUND",
+            message:
+              "Không tìm thấy BIB"
+          });
+
+          continue;
+        }
+
+        if (
+          athlete.RegistrationStatus ===
+          "CHECKED_IN"
+        ) {
+          results.push({
+            bibNumber,
+            fullName:
+              athlete.FullName,
+            status:
+              "ALREADY_CHECKED_IN",
+            message:
+              "Đã check-in trước đó"
+          });
+
+          continue;
+        }
+
+        if (
+          athlete.RegistrationStatus !==
+          "REGISTERED"
+        ) {
+          results.push({
+            bibNumber,
+            fullName:
+              athlete.FullName,
+            status:
+              "INVALID_STATUS",
+            message:
+              `Trạng thái hiện tại: ${athlete.RegistrationStatus}`
+          });
+
+          continue;
+        }
+
+        eligible.push(
+          athlete
+        );
+      }
+
+      if (
+        eligible.length > 0
+      ) {
+        const ids =
+          eligible.map(
+            (athlete) =>
+              athlete.RegistrationID
+          );
+
+        const idPlaceholders =
+          ids
+            .map(() => "?")
+            .join(", ");
+
+        await connection.execute(
+          `
+            UPDATE Registrations
+
+            SET
+              RegistrationStatus =
+                'CHECKED_IN'
+
+            WHERE RegistrationID
+              IN (${idPlaceholders})
+          `,
+          ids
+        );
+
+        await connection.execute(
+          `
+            INSERT INTO RaceRuns
+            (
+              RegistrationID,
+              RunStatus
+            )
+
+            SELECT
+              RegistrationID,
+              'CHECKED_IN'
+
+            FROM Registrations
+
+            WHERE RegistrationID
+              IN (${idPlaceholders})
+
+            ON DUPLICATE KEY UPDATE
+              RunStatus =
+                CASE
+                  WHEN StartTime IS NULL
+                    AND FinishTime IS NULL
+                  THEN 'CHECKED_IN'
+                  ELSE RunStatus
+                END
+          `,
+          ids
+        );
+
+        for (
+          const athlete
+          of eligible
+        ) {
+          results.push({
+            bibNumber:
+              athlete.BibNumber,
+
+            fullName:
+              athlete.FullName,
+
+            status:
+              "CHECKED_IN",
+
+            message:
+              "Check-in thành công"
+          });
+        }
+      }
+
+      await connection.commit();
+
+      const checkedInCount =
+        results.filter(
+          (item) =>
+            item.status ===
+            "CHECKED_IN"
+        ).length;
+
+      const alreadyCheckedInCount =
+        results.filter(
+          (item) =>
+            item.status ===
+            "ALREADY_CHECKED_IN"
+        ).length;
+
+      const failedCount =
+        results.length -
+        checkedInCount -
+        alreadyCheckedInCount;
+
+      return sendSuccess(
+        res,
+        {
+          requestedCount:
+            bibNumbers.length,
+
+          checkedInCount,
+
+          alreadyCheckedInCount,
+
+          failedCount,
+
+          results
+        },
+        `Đã check-in ${checkedInCount}/${bibNumbers.length} BIB trong danh sách`
+      );
+    } catch (error) {
+      try {
+        await connection.rollback();
+      } catch (rollbackError) {
+        console.error(
+          "Bulk check-in rollback error:",
+          rollbackError
+        );
+      }
+
+      console.error(
+        "Bulk check-in error:",
+        error
+      );
+
+      return sendError(
+        res,
+        500,
+        "Không thể check-in danh sách VĐV",
+        "BULK_CHECK_IN_FAILED"
+      );
+    } finally {
+      connection.release();
+    }
+  }
+);
+
+
+// =====================================================
+// CHECK-IN TẤT CẢ
+// Tất cả REGISTERED -> CHECKED_IN
+// =====================================================
 app.post(
   "/api/check-in/all",
   async (req, res) => {
@@ -1402,14 +1878,20 @@ app.post(
           SELECT
             RegistrationID,
             BibNumber
+
           FROM Registrations
+
           WHERE RegistrationStatus =
             'REGISTERED'
+
           ORDER BY RegistrationID
+
           FOR UPDATE
         `);
 
-      if (rows.length === 0) {
+      if (
+        rows.length === 0
+      ) {
         await connection.commit();
 
         return sendSuccess(
@@ -1436,9 +1918,11 @@ app.post(
       await connection.execute(
         `
           UPDATE Registrations
+
           SET
             RegistrationStatus =
               'CHECKED_IN'
+
           WHERE RegistrationID
             IN (${placeholders})
         `,
@@ -1452,10 +1936,13 @@ app.post(
             RegistrationID,
             RunStatus
           )
+
           SELECT
             RegistrationID,
             'CHECKED_IN'
+
           FROM Registrations
+
           WHERE RegistrationID
             IN (${placeholders})
 
@@ -1513,6 +2000,261 @@ app.post(
     }
   }
 );
+app.post(
+  "/api/complaints",
+  async (req, res) => {
+    const connection =
+      await pool.getConnection();
+
+    try {
+      const bibNumber =
+        normalizeBib(
+          req.body?.bibNumber
+        );
+
+      const complaintType =
+        normalizeText(
+          req.body?.complaintType
+        );
+
+      const complaintMessage =
+        normalizeText(
+          req.body?.complaintMessage
+        );
+
+      const contactInfo =
+        normalizeText(
+          req.body?.contactInfo
+        );
+
+      if (!bibNumber) {
+        return sendError(
+          res,
+          400,
+          "Vui lòng nhập BIB",
+          "BIB_REQUIRED"
+        );
+      }
+
+      if (!complaintType) {
+        return sendError(
+          res,
+          400,
+          "Vui lòng nhập loại khiếu nại",
+          "COMPLAINT_TYPE_REQUIRED"
+        );
+      }
+
+      if (!complaintMessage) {
+        return sendError(
+          res,
+          400,
+          "Vui lòng nhập nội dung khiếu nại",
+          "COMPLAINT_MESSAGE_REQUIRED"
+        );
+      }
+
+      await connection.beginTransaction();
+
+      const [resultRows] =
+        await connection.execute(
+          `
+            SELECT
+              rs.ResultID,
+              rs.RunID,
+              rs.ResultStatus,
+
+              r.BibNumber,
+
+              u.FullName
+
+            FROM Results rs
+
+            INNER JOIN RaceRuns rr
+              ON rr.RunID =
+                rs.RunID
+
+            INNER JOIN Registrations r
+              ON r.RegistrationID =
+                rr.RegistrationID
+
+            INNER JOIN Users u
+              ON u.UserID =
+                r.UserID
+
+            WHERE r.BibNumber = ?
+              AND rs.ResultStatus = 'OFFICIAL'
+
+            LIMIT 1
+            FOR UPDATE
+          `,
+          [
+            bibNumber
+          ]
+        );
+
+      if (
+        resultRows.length === 0
+      ) {
+        await connection.rollback();
+
+        return sendError(
+          res,
+          404,
+          "Không tìm thấy kết quả OFFICIAL của BIB này.",
+          "RESULT_NOT_OFFICIAL"
+        );
+      }
+
+      const result =
+        resultRows[0];
+        if (result.ResultStatus === "PENDING") {
+  const [complaintRows] = await pool.execute(
+    `
+      SELECT
+        ComplaintID,
+        ComplaintType,
+        ComplaintMessage,
+        ContactInfo,
+        ComplaintStatus,
+        Resolution,
+        ResolutionNote,
+        CreatedAt,
+        ResolvedAt
+      FROM Complaints
+      WHERE ResultID = ?
+      ORDER BY CreatedAt DESC
+    `,
+    [result.ResultID]
+  );
+
+  return sendSuccess(
+    res,
+    {
+      available: false,
+      reason: "UNDER_REVIEW",
+
+      ResultID: result.ResultID,
+      RunID: result.RunID,
+
+      FullName: result.FullName,
+      BibNumber: result.BibNumber,
+      Distance: result.Distance,
+
+      ResultStatus: result.ResultStatus,
+
+      StartTime: result.StartTime,
+      CP01Time: result.CP01Time,
+      CP02Time: result.CP02Time,
+      CP03Time: result.CP03Time,
+      FinishTime: result.FinishTime,
+
+      TotalTimeSeconds: result.TotalTimeSeconds,
+
+      complaints: complaintRows
+    },
+    "BTC đang kiểm tra lại kết quả."
+  );
+}
+
+      const [insertResult] =
+        await connection.execute(
+          `
+            INSERT INTO Complaints
+            (
+              ResultID,
+              BibNumber,
+              ComplaintType,
+              ComplaintMessage,
+              ContactInfo,
+              ComplaintStatus,
+              Resolution,
+              ResolutionNote,
+              CreatedAt,
+              ResolvedAt
+            )
+            VALUES
+            (
+              ?,
+              ?,
+              ?,
+              ?,
+              ?,
+              'OPEN',
+              NULL,
+              NULL,
+              NOW(3),
+              NULL
+            )
+          `,
+          [
+            result.ResultID,
+            bibNumber,
+            complaintType,
+            complaintMessage,
+            contactInfo
+          ]
+        );
+
+      const [complaintRows] =
+        await connection.execute(
+          `
+            SELECT
+              ComplaintID,
+              ResultID,
+              BibNumber,
+              ComplaintType,
+              ComplaintMessage,
+              ContactInfo,
+              ComplaintStatus,
+              Resolution,
+              ResolutionNote,
+              CreatedAt,
+              ResolvedAt
+            FROM Complaints
+            WHERE ComplaintID = ?
+            LIMIT 1
+          `,
+          [
+            insertResult.insertId
+          ]
+        );
+
+      await connection.commit();
+
+      return sendSuccess(
+        res,
+        complaintRows[0],
+        "Đã gửi khiếu nại",
+        201
+      );
+    } catch (error) {
+      try {
+        await connection.rollback();
+      } catch (rollbackError) {
+        console.error(
+          "Create complaint rollback error:",
+          rollbackError
+        );
+      }
+
+      console.error(
+        "Create complaint error:",
+        error
+      );
+
+      return sendError(
+        res,
+        500,
+        "Không thể gửi khiếu nại",
+        "COMPLAINT_CREATE_FAILED"
+      );
+    } finally {
+      connection.release();
+    }
+  }
+);
+
 
 async function getRaceRow(
   executor,
@@ -1637,51 +2379,50 @@ app.post(
           "RUN_NOT_CREATED"
         );
       }
+if (
+  athlete.RunStatus ===
+  "RUNNING"
+) {
+  await connection.commit();
 
-      if (
-        [
-          "STOPPED",
-          "FINISHED"
-        ].includes(
-          athlete.RunStatus
-        )
-      ) {
-        await connection.rollback();
+  return sendSuccess(
+    res,
+    {
+      ...athlete,
+      alreadyStarted: true
+    },
+    "VĐV đã START trước đó"
+  );
+}
 
-        return sendError(
-          res,
-          409,
-          "Không thể START ở trạng thái hiện tại",
-          "START_INVALID_STATUS"
-        );
-      }
+if (
+  athlete.RunStatus !==
+  "CHECKED_IN"
+) {
+  await connection.rollback();
 
-      if (
-        athlete.StartTime
-      ) {
-        await connection.commit();
+  return sendError(
+    res,
+    409,
+    `Không thể START khi lượt chạy đang ở trạng thái ${athlete.RunStatus}.`,
+    "START_INVALID_STATUS"
+  );
+}
 
-        return sendSuccess(
-          res,
-          {
-            ...athlete,
-            alreadyStarted: true
-          },
-          "VĐV đã START trước đó"
-        );
-      }
-      await connection.execute(
-        `
-          UPDATE RaceRuns
-          SET
-            StartTime = NOW(3),
-            RunStatus = 'RUNNING'
-          WHERE RunID = ?
-        `,
-        [
-          athlete.RunID
-        ]
-      );
+await connection.execute(
+  `
+    UPDATE RaceRuns
+    SET
+      StartTime = NOW(3),
+      RunStatus = 'RUNNING'
+    WHERE RunID = ?
+      AND RunStatus = 'CHECKED_IN'
+  `,
+  [
+    athlete.RunID
+  ]
+);
+      
 
       const [runRows] =
         await connection.execute(
@@ -3536,7 +4277,20 @@ app.post(
     }
   }
 );
-
+// =====================================================
+// PUBLIC RESULT LOOKUP BY BIB
+//
+// OFFICIAL:
+// - Public result is available normally.
+//
+// PENDING after complaint RETURN_PENDING:
+// - Keep showing previous timing for reference.
+// - Tell athlete BTC is reviewing the complaint.
+// - Include complaint history.
+//
+// Normal PENDING before first approval:
+// - Result is not public yet.
+// =====================================================
 app.get(
   "/api/results/bib/:bibNumber",
   async (req, res) => {
@@ -3554,6 +4308,10 @@ app.get(
           "BIB_REQUIRED"
         );
       }
+
+      // =================================================
+      // CHECK BIB EXISTS
+      // =================================================
       const [athleteRows] =
         await pool.execute(
           `
@@ -3568,16 +4326,13 @@ app.get(
             FROM Registrations r
 
             INNER JOIN Users u
-              ON u.UserID =
-                r.UserID
+              ON u.UserID = r.UserID
 
             WHERE r.BibNumber = ?
 
             LIMIT 1
           `,
-          [
-            bibNumber
-          ]
+          [bibNumber]
         );
 
       if (
@@ -3590,22 +4345,107 @@ app.get(
           "BIB_NOT_FOUND"
         );
       }
+
+      // =================================================
+      // GET RESULT
+      //
+      // IMPORTANT:
+      // Do NOT restrict to OFFICIAL here.
+      // We need PENDING result too when BTC is reviewing
+      // a complaint.
+      // =================================================
       const [resultRows] =
         await pool.execute(
           `
             SELECT
               rs.ResultID,
+              rs.RunID,
               rs.TotalTimeSeconds,
               rs.ResultStatus,
+              rs.ApprovedBy,
               rs.ApprovedAt,
 
               rr.StartTime,
               rr.FinishTime,
+              rr.RunStatus,
 
+              r.RegistrationStatus,
               r.BibNumber,
               r.Distance,
 
-              u.FullName
+              u.FullName,
+              u.DateOfBirth,
+              u.Phone,
+              u.Email,
+              u.Gender,
+
+              (
+                SELECT cp.ScanTime
+                FROM Checkpoints cp
+                WHERE cp.RunID = rr.RunID
+                  AND cp.CheckpointCode = 'CP01'
+                  AND cp.ScanStatus = 'COMPLETED'
+                ORDER BY cp.ScanTime DESC
+                LIMIT 1
+              ) AS CP01Time,
+
+              (
+                SELECT cp.ScanTime
+                FROM Checkpoints cp
+                WHERE cp.RunID = rr.RunID
+                  AND cp.CheckpointCode = 'CP02'
+                  AND cp.ScanStatus = 'COMPLETED'
+                ORDER BY cp.ScanTime DESC
+                LIMIT 1
+              ) AS CP02Time,
+
+              (
+                SELECT cp.ScanTime
+                FROM Checkpoints cp
+                WHERE cp.RunID = rr.RunID
+                  AND cp.CheckpointCode = 'CP03'
+                  AND cp.ScanStatus = 'COMPLETED'
+                ORDER BY cp.ScanTime DESC
+                LIMIT 1
+              ) AS CP03Time,
+
+              (
+                SELECT COUNT(*) + 1
+                FROM Results rs2
+
+                INNER JOIN RaceRuns rr2
+                  ON rr2.RunID =
+                    rs2.RunID
+
+                INNER JOIN Registrations r2
+                  ON r2.RegistrationID =
+                    rr2.RegistrationID
+
+                WHERE rs2.ResultStatus =
+                    'OFFICIAL'
+                  AND r2.Distance =
+                    r.Distance
+                  AND rs2.TotalTimeSeconds <
+                    rs.TotalTimeSeconds
+              ) AS RankPosition,
+
+              (
+                SELECT COUNT(*)
+                FROM Results rs3
+
+                INNER JOIN RaceRuns rr3
+                  ON rr3.RunID =
+                    rs3.RunID
+
+                INNER JOIN Registrations r3
+                  ON r3.RegistrationID =
+                    rr3.RegistrationID
+
+                WHERE rs3.ResultStatus =
+                    'OFFICIAL'
+                  AND r3.Distance =
+                    r.Distance
+              ) AS RankedAthleteCount
 
             FROM Results rs
 
@@ -3622,18 +4462,70 @@ app.get(
                 r.UserID
 
             WHERE r.BibNumber = ?
-              AND rs.ResultStatus =
-                'OFFICIAL'
 
             LIMIT 1
           `,
-          [
-            bibNumber
-          ]
+          [bibNumber]
         );
 
+      // Athlete exists but there is no result yet.
       if (
         resultRows.length === 0
+      ) {
+        return sendError(
+          res,
+          404,
+          "VĐV chưa có kết quả.",
+          "RESULT_NOT_FOUND"
+        );
+      }
+
+      const result =
+        resultRows[0];
+
+      // =================================================
+      // GET COMPLAINT HISTORY
+      // =================================================
+      const [complaintRows] =
+        await pool.execute(
+          `
+            SELECT
+              ComplaintID,
+              ResultID,
+              BibNumber,
+              ComplaintType,
+              ComplaintMessage,
+              ContactInfo,
+              ComplaintStatus,
+              Resolution,
+              ResolutionNote,
+              CreatedAt,
+              ResolvedAt
+
+            FROM Complaints
+
+            WHERE ResultID = ?
+
+            ORDER BY CreatedAt DESC
+          `,
+          [result.ResultID]
+        );
+
+      // =================================================
+      // DETERMINE WHETHER PENDING IS CAUSED BY COMPLAINT
+      // =================================================
+      const hasReturnPendingComplaint =
+        complaintRows.some(
+          (complaint) =>
+            complaint.Resolution ===
+            "RETURN_PENDING"
+        );
+      // NORMAL PENDING
+
+      if (
+        result.ResultStatus ===
+          "PENDING" &&
+        !hasReturnPendingComplaint
       ) {
         return sendError(
           res,
@@ -3643,10 +4535,217 @@ app.get(
         );
       }
 
-      return sendSuccess(
+      // =================================================
+      // MASK PRIVATE PUBLIC INFORMATION
+      // =================================================
+      const maskPhone = (
+        phone
+      ) => {
+        if (!phone) {
+          return null;
+        }
+
+        const value =
+          String(phone);
+
+        if (
+          value.length <= 6
+        ) {
+          return "***";
+        }
+
+        return (
+          value.slice(0, 3) +
+          "****" +
+          value.slice(-3)
+        );
+      };
+
+      const maskEmail = (
+        email
+      ) => {
+        if (!email) {
+          return null;
+        }
+
+        const value =
+          String(email);
+
+        const atIndex =
+          value.indexOf("@");
+
+        if (
+          atIndex <= 0
+        ) {
+          return "***";
+        }
+
+        const username =
+          value.slice(
+            0,
+            atIndex
+          );
+
+        const domain =
+          value.slice(
+            atIndex
+          );
+
+        const visible =
+          username.length <= 2
+            ? username.slice(
+                0,
+                1
+              )
+            : username.slice(
+                0,
+                3
+              );
+
+        return (
+          visible +
+          "***" +
+          domain
+        );
+      };
+
+      // =================================================
+      // COMMON PUBLIC DATA
+      // =================================================
+      const publicResult = {
+        ResultID:
+          result.ResultID,
+
+        RunID:
+          result.RunID,
+
+        FullName:
+          result.FullName,
+
+        BibNumber:
+          result.BibNumber,
+
+        Distance:
+          result.Distance,
+
+        Gender:
+          result.Gender,
+
+        DateOfBirth:
+          result.DateOfBirth,
+
+        Phone:
+          maskPhone(
+            result.Phone
+          ),
+
+        Email:
+          maskEmail(
+            result.Email
+          ),
+
+        RegistrationStatus:
+          result.RegistrationStatus,
+
+        RunStatus:
+          result.RunStatus,
+
+        ResultStatus:
+          result.ResultStatus,
+
+        ApprovedAt:
+          result.ApprovedAt,
+
+        StartTime:
+          result.StartTime,
+
+        CP01Time:
+          result.CP01Time,
+
+        CP02Time:
+          result.CP02Time,
+
+        CP03Time:
+          result.CP03Time,
+
+        FinishTime:
+          result.FinishTime,
+
+        TotalTimeSeconds:
+          result.TotalTimeSeconds,
+
+        complaints:
+          complaintRows
+      };
+
+
+      // COMPLAINT REVIEW
+  
+      if (
+        result.ResultStatus ===
+          "PENDING" &&
+        hasReturnPendingComplaint
+      ) {
+        return sendSuccess(
+          res,
+          {
+            ...publicResult,
+
+            available: false,
+
+            reason:
+              "UNDER_REVIEW",
+
+            RankPosition:
+              null,
+
+            RankedAthleteCount:
+              null
+          },
+          "BTC đang kiểm tra lại lời khiếu nại của bạn."
+        );
+      }
+
+      // =================================================
+      // OFFICIAL RESULT
+      // =================================================
+      if (
+        result.ResultStatus ===
+        "OFFICIAL"
+      ) {
+        return sendSuccess(
+          res,
+          {
+            ...publicResult,
+
+            available: true,
+
+            reason:
+              "OFFICIAL",
+
+            RankPosition:
+              Number(
+                result.RankPosition
+              ),
+
+            RankedAthleteCount:
+              Number(
+                result
+                  .RankedAthleteCount
+              )
+          },
+          "Tra cứu kết quả thành công"
+        );
+      }
+
+      // =================================================
+      // FALLBACK
+      // =================================================
+      return sendError(
         res,
-        resultRows[0],
-        "Tra cứu kết quả thành công"
+        404,
+        "Kết quả chưa thể công bố.",
+        "RESULT_NOT_AVAILABLE"
       );
     } catch (error) {
       console.error(
@@ -3663,6 +4762,8 @@ app.get(
     }
   }
 );
+
+  
 
 app.post(
   "/api/complaints",
@@ -3965,13 +5066,44 @@ app.get(
           rs.ResultStatus,
 
           rr.RunID,
-          rr.StartTime,
-          rr.FinishTime,
-          rr.RunStatus,
+rr.StartTime,
 
-          r.Distance,
+(
+  SELECT cp.ScanTime
+  FROM Checkpoints cp
+  WHERE cp.RunID = rr.RunID
+    AND cp.CheckpointCode = 'CP01'
+    AND cp.ScanStatus = 'COMPLETED'
+  ORDER BY cp.ScanTime DESC
+  LIMIT 1
+) AS CP01Time,
 
-          u.FullName
+(
+  SELECT cp.ScanTime
+  FROM Checkpoints cp
+  WHERE cp.RunID = rr.RunID
+    AND cp.CheckpointCode = 'CP02'
+    AND cp.ScanStatus = 'COMPLETED'
+  ORDER BY cp.ScanTime DESC
+  LIMIT 1
+) AS CP02Time,
+
+(
+  SELECT cp.ScanTime
+  FROM Checkpoints cp
+  WHERE cp.RunID = rr.RunID
+    AND cp.CheckpointCode = 'CP03'
+    AND cp.ScanStatus = 'COMPLETED'
+  ORDER BY cp.ScanTime DESC
+  LIMIT 1
+) AS CP03Time,
+
+rr.FinishTime,
+rr.RunStatus,
+
+r.Distance,
+
+u.FullName
 
         FROM Complaints c
 
